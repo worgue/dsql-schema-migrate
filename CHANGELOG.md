@@ -6,6 +6,9 @@ rev を進める判断材料はこのファイルと git log になる。
 
 ## 0.1.0 (未リリース)
 
+- fix: `normalize_export` が運用テーブル `schema_migration_progress` を除去して
+  いなかった (apply 実行済みクラスタへの `export --dsql --check` が必ず偽ドリフトに
+  なる。kadai の sandbox 実機で発見)
 - 初版。kikiwake の workspace crate からの切り出し
   - `diff`: schema.sql と「migrations/ の再生結果 (baseline)」の差分から
     DSQL 方言の migration を生成 (psqldef --dry-run を機械変換。変換不能は fail-loud)

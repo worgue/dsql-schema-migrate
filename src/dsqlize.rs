@@ -121,7 +121,9 @@ fn strip_using_btree(stmt: &str) -> String {
 ///
 /// - `USING btree` を除去（psqldef 自身の generic parser がカラム名 `text` 等で
 ///   これに躓く問題も避けられる。除去後の INDEX ASYNC が DSQL で受理されることは実証済み）
-/// - 運用テーブル `schema_migrations` を除去（DSQL からの export でのドリフト検査用）
+/// - 運用テーブル `schema_migrations` / `schema_migration_progress` を除去
+///   （DSQL からの export でのドリフト検査用。applier が作る管理テーブルは
+///   schema.sql に書かれないため、残すと偽ドリフトになる）
 /// - CREATE TABLE のカラム行をアルファベット順にソート（psqldef の export 順は
 ///   DB の物理カラム順に依存して揺れるため、正規形はこちらで確定させる。
 ///   ラウンドトリップ・ドリフト検査のバイト一致はこのソートが前提）
@@ -132,7 +134,7 @@ fn strip_using_btree(stmt: &str) -> String {
 pub fn normalize_export(export: &str, from_dsql: bool) -> String {
     let statements: Vec<String> = split_statements(&strip_using_btree(export))
         .into_iter()
-        .filter(|s| !s.contains("schema_migrations"))
+        .filter(|s| !s.contains("schema_migrations") && !s.contains("schema_migration_progress"))
         .map(|s| {
             if s.starts_with("CREATE TABLE") {
                 sort_table_body(&s)
@@ -260,8 +262,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_export_は_using_btree_と_schema_migrations_を除去する() {
-        let export = "CREATE TABLE \"public\".\"a\" (\n    \"id\" uuid NOT NULL\n);\n\nCREATE TABLE \"public\".\"schema_migrations\" (\n    \"version\" text NOT NULL\n);\n\nCREATE INDEX idx_a ON public.a USING btree (id);\n";
+    fn normalize_export_は_using_btree_と運用テーブルを除去する() {
+        let export = "CREATE TABLE \"public\".\"a\" (\n    \"id\" uuid NOT NULL\n);\n\nCREATE TABLE \"public\".\"schema_migrations\" (\n    \"version\" text NOT NULL\n);\n\nCREATE TABLE \"public\".\"schema_migration_progress\" (\n    \"version\" text NOT NULL\n);\n\nCREATE INDEX idx_a ON public.a USING btree (id);\n";
         let normalized = normalize_export(export, false);
         assert_eq!(
             normalized,
