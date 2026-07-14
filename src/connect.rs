@@ -96,6 +96,19 @@ pub fn local_url(user: &str, host: &str, port: u16, dbname: &str) -> String {
     format!("postgres://{user}@{host}:{port}/{dbname}?sslmode=disable")
 }
 
+/// DROP/CREATE DATABASE は識別子をプレースホルダにできず SQL に直接埋め込むため、
+/// 埋め込んでよい形（英字/_ 始まり + 英数字/_ のみ）かを事前に検査する。
+fn ensure_simple_dbname(name: &str) -> anyhow::Result<()> {
+    let mut chars = name.chars();
+    let head_ok = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_');
+    if !(head_ok && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')) {
+        anyhow::bail!(
+            "DB 名に使えない文字が含まれています (英字/_ 始まり + 英数字/_ のみ): {name}"
+        );
+    }
+    Ok(())
+}
+
 /// ローカル PG のデータベースを作り直す（存在すれば強制 DROP）。
 pub async fn recreate_local_db(
     user: &str,
@@ -103,6 +116,7 @@ pub async fn recreate_local_db(
     port: u16,
     dbname: &str,
 ) -> anyhow::Result<()> {
+    ensure_simple_dbname(dbname)?;
     let admin = connect(&DbSource::Direct(local_url(user, host, port, "postgres"))).await?;
     use sea_orm::ConnectionTrait;
     admin
@@ -114,4 +128,18 @@ pub async fn recreate_local_db(
         .await
         .with_context(|| format!("CREATE DATABASE {dbname} に失敗しました"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_simple_dbname_は識別子として安全な名前だけ通す() {
+        assert!(ensure_simple_dbname("_dsql_lab").is_ok());
+        assert!(ensure_simple_dbname("lab2").is_ok());
+        assert!(ensure_simple_dbname("2lab").is_err());
+        assert!(ensure_simple_dbname("").is_err());
+        assert!(ensure_simple_dbname("x WITH (FORCE); DROP DATABASE y").is_err());
+    }
 }

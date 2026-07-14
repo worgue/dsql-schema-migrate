@@ -93,15 +93,20 @@ fn transform(stmt: &str) -> anyhow::Result<String> {
 }
 
 /// CREATE TABLE が DSQL 非対応の要素を含まないことを確認する。
+/// キーワードの大文字小文字は入力（手書き schema.sql の書式が psqldef を素通りする）に
+/// 依存するため、小文字化してから判定する。nextval() は serial をシーケンス既定値に
+/// 展開した形（DSQL はシーケンス自体が使えない）。
 fn ensure_dsql_table(stmt: &str) -> anyhow::Result<()> {
+    let lower = stmt.to_lowercase();
     for forbidden in [
-        "FOREIGN KEY",
-        "REFERENCES ",
+        "foreign key",
+        "references ",
         " serial",
         " bigserial",
         " smallserial",
+        "nextval(",
     ] {
-        if stmt.contains(forbidden) {
+        if lower.contains(forbidden) {
             bail!(
                 "DSQL は {} を使えません (FK は参照カラムのみ・連番は UUID 等で代替)。\
                  schema.sql を修正してください:\n{stmt}",
@@ -132,9 +137,10 @@ fn strip_using_btree(stmt: &str) -> String {
 ///   `_index` で終わる名前のテーブルとは共存できないので付けないこと）
 /// - 文の間は空行 1 つ、末尾は改行 1 つに揃える
 pub fn normalize_export(export: &str, from_dsql: bool) -> String {
+    // 変換（catalog リーク除去）→ 運用テーブル除去の順。DSQL の `_index` リークを
+    // 先に剥がすことで、運用テーブルへの index も対象テーブル名の一致で落とせる
     let statements: Vec<String> = split_statements(&strip_using_btree(export))
         .into_iter()
-        .filter(|s| !s.contains("schema_migrations") && !s.contains("schema_migration_progress"))
         .map(|s| {
             if s.starts_with("CREATE TABLE") {
                 sort_table_body(&s)
@@ -146,12 +152,39 @@ pub fn normalize_export(export: &str, from_dsql: bool) -> String {
                 s
             }
         })
+        .filter(|s| !is_internal_table_statement(s))
         .collect();
     let mut out = statements.join(";\n\n");
     if !out.is_empty() {
         out.push_str(";\n");
     }
     out
+}
+
+/// applier が管理用に作るテーブル（schema.sql には書かれないため export から除去する）。
+const INTERNAL_TABLES: [&str; 2] = ["schema_migrations", "schema_migration_progress"];
+
+/// 文の対象テーブルが applier の運用テーブルなら true。
+/// 名前の部分一致では判定しない（`user_schema_migrations_log` のような
+/// 名前が偶然含むだけの別テーブルや、運用テーブル名と同名のカラムを持つ
+/// テーブルを巻き込んで、ドリフト検査を偽陰性にしないため）。
+fn is_internal_table_statement(stmt: &str) -> bool {
+    target_table(stmt).is_some_and(|table| INTERNAL_TABLES.contains(&table.as_str()))
+}
+
+/// 文の対象テーブル名（CREATE TABLE の対象 / CREATE INDEX の ON 先）を、
+/// schema 修飾と引用符を剥がした素の名前で取り出す。対象を持たない文は None。
+fn target_table(stmt: &str) -> Option<String> {
+    let rest = if let Some(rest) = stmt.strip_prefix("CREATE TABLE ") {
+        rest
+    } else if stmt.starts_with("CREATE INDEX") || stmt.starts_with("CREATE UNIQUE INDEX") {
+        stmt.split(" ON ").nth(1)?
+    } else {
+        return None;
+    };
+    let token = rest.split(|c: char| c.is_whitespace() || c == '(').next()?;
+    let name = token.rsplit('.').next()?.trim_matches('"');
+    (!name.is_empty()).then(|| name.to_owned())
 }
 
 /// CREATE TABLE 本体の行（カラム定義・制約）を並べ替える。
@@ -259,6 +292,15 @@ mod tests {
         );
         assert!(dsqlize(&stmts(&["CREATE TABLE a (id serial PRIMARY KEY)"])).is_err());
         assert!(dsqlize(&stmts(&["ALTER TABLE a ALTER COLUMN c TYPE text"])).is_err());
+        // キーワードは大文字小文字を問わず検出する（手書き schema.sql が素通りする形）
+        assert!(dsqlize(&stmts(&["CREATE TABLE a (id SERIAL PRIMARY KEY)"])).is_err());
+        // serial のシーケンス展開形（nextval）も止める
+        assert!(
+            dsqlize(&stmts(&[
+                "CREATE TABLE a (id integer NOT NULL DEFAULT nextval('a_id_seq'::regclass))",
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
@@ -271,6 +313,30 @@ mod tests {
         );
         // 正規形は冪等（もう一度通しても変わらない）
         assert_eq!(normalize_export(&normalized, false), normalized);
+    }
+
+    #[test]
+    fn normalize_export_は運用テーブル名を含むだけの別テーブルを除去しない() {
+        // 名前が部分一致するだけのユーザーテーブルは残す（旧実装は substring 判定で
+        // 黙って落としており、ドリフト検査が偽陰性になっていた）
+        let export = "CREATE TABLE \"public\".\"user_schema_migrations_log\" (\n    \"id\" uuid NOT NULL\n);\n";
+        assert_eq!(normalize_export(export, false), export);
+
+        // 運用テーブル名と同名の「カラム」を持つテーブルも残す
+        let export =
+            "CREATE TABLE \"public\".\"a\" (\n    \"schema_migrations\" text NOT NULL\n);\n";
+        assert_eq!(normalize_export(export, false), export);
+
+        // 運用テーブルへの index は対象テーブル名の一致で除去する
+        let export = "CREATE INDEX idx ON public.schema_migration_progress (version);\n\nCREATE INDEX idx_a ON public.a (id);\n";
+        assert_eq!(
+            normalize_export(export, false),
+            "CREATE INDEX idx_a ON public.a (id);\n"
+        );
+
+        // DSQL の catalog リーク（`<table>_index`）越しでも運用テーブルを除去できる
+        let export = "CREATE UNIQUE INDEX pkey ON public.schema_migrations_index (version);\n";
+        assert_eq!(normalize_export(export, true), "");
     }
 
     #[test]

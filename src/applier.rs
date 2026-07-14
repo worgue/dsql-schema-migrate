@@ -12,7 +12,7 @@
 //!   履歴・進捗テーブルを作らない
 //! - 非 DSQL（ローカル PG）へは `CREATE INDEX ASYNC` を同期 `CREATE INDEX` に変換する
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::Context;
@@ -96,17 +96,32 @@ async fn execute(db: &DatabaseConnection, sql: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 進捗表に「version の適用済み文数」を設定する（DSQL は UPSERT 不可なので delete+insert）。
-async fn set_progress(db: &DatabaseConnection, version: &str, count: usize) -> anyhow::Result<()> {
-    execute(
-        db,
-        &format!("DELETE FROM schema_migration_progress WHERE version = '{version}'"),
-    )
-    .await?;
+/// SQL 文字列リテラルに埋め込む値をエスケープする（version = ファイル名。
+/// `'` を含む名前で文が壊れないよう、埋め込み箇所は必ずここを通す）。
+fn sql_literal(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+/// version の進捗行を削除する。
+async fn delete_progress(db: &DatabaseConnection, version: &str) -> anyhow::Result<()> {
     execute(
         db,
         &format!(
-            "INSERT INTO schema_migration_progress (version, applied_count) VALUES ('{version}', {count})"
+            "DELETE FROM schema_migration_progress WHERE version = '{}'",
+            sql_literal(version)
+        ),
+    )
+    .await
+}
+
+/// 進捗表に「version の適用済み文数」を設定する（DSQL は UPSERT 不可なので delete+insert）。
+async fn set_progress(db: &DatabaseConnection, version: &str, count: usize) -> anyhow::Result<()> {
+    delete_progress(db, version).await?;
+    execute(
+        db,
+        &format!(
+            "INSERT INTO schema_migration_progress (version, applied_count) VALUES ('{}', {count})",
+            sql_literal(version)
         ),
     )
     .await?;
@@ -123,7 +138,7 @@ pub async fn apply_migrations(
     migrations: &[Migration],
     opts: &ApplyOptions,
 ) -> anyhow::Result<Vec<String>> {
-    let mut applied: Vec<String> = Vec::new();
+    let mut applied: HashSet<String> = HashSet::new();
     let mut progress: HashMap<String, usize> = HashMap::new();
     if opts.record_history {
         execute(
@@ -165,6 +180,11 @@ pub async fn apply_migrations(
     let mut newly_applied = Vec::new();
     for migration in migrations {
         if applied.contains(&migration.version) {
+            // 「履歴の記録」と「進捗行の削除」の境界にクラッシュが入ると進捗行だけが
+            // 残り続ける。適用済みと分かった時点で掃除する
+            if opts.record_history && progress.contains_key(&migration.version) {
+                delete_progress(db, &migration.version).await?;
+            }
             continue;
         }
         // 前回途中まで適用済みなら、その次の文から再開する
@@ -188,18 +208,11 @@ pub async fn apply_migrations(
                 db,
                 &format!(
                     "INSERT INTO schema_migrations (version) VALUES ('{}')",
-                    migration.version
+                    sql_literal(&migration.version)
                 ),
             )
             .await?;
-            execute(
-                db,
-                &format!(
-                    "DELETE FROM schema_migration_progress WHERE version = '{}'",
-                    migration.version
-                ),
-            )
-            .await?;
+            delete_progress(db, &migration.version).await?;
         }
         newly_applied.push(migration.version.clone());
     }
@@ -248,6 +261,12 @@ mod tests {
             to_local_pg("CREATE TABLE t (id uuid)"),
             "CREATE TABLE t (id uuid)"
         );
+    }
+
+    #[test]
+    fn sql_literal_はシングルクォートをエスケープする() {
+        assert_eq!(sql_literal("a'b"), "a''b");
+        assert_eq!(sql_literal("plain"), "plain");
     }
 
     /// 再開は「先頭から start 文を飛ばす」だけ、という位置ロジックを純粋に確認する。
@@ -378,6 +397,18 @@ mod tests {
         // 3 回目: 既適用なので何もしない（冪等）
         let again = apply_migrations(&db, &fixed, &opts).await.unwrap();
         assert!(again.is_empty());
+
+        // 4 回目: 「履歴の記録 → 進捗行の削除」の境界クラッシュで残った stale な
+        // 進捗行は、次の実行で掃除される
+        execute(
+            &db,
+            "INSERT INTO schema_migration_progress (version, applied_count) VALUES ('v1', 3)",
+        )
+        .await
+        .unwrap();
+        let again = apply_migrations(&db, &fixed, &opts).await.unwrap();
+        assert!(again.is_empty());
+        assert_eq!(progress_count(&db, "v1").await, None);
 
         cleanup(&db).await;
     }

@@ -51,9 +51,10 @@ fn run(mut cmd: Command, stdin: Option<&str>) -> anyhow::Result<String> {
     })
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
-    let mut child = cmd
-        .spawn()
-        .context("psqldef を起動できません。`just setup-psqldef` で導入してください")?;
+    let mut child = cmd.spawn().context(
+        "psqldef を起動できません。PATH に psqldef を導入してください \
+             (導入手順は README。DSQL_SCHEMA_PSQLDEF でバイナリのパスを指定することもできます)",
+    )?;
     if let Some(desired) = stdin {
         child
             .stdin
