@@ -6,6 +6,20 @@ rev を進める判断材料はこのファイルと git log になる。
 
 ## 0.1.0 (未リリース)
 
+- **CLI 挙動変更**: `--pg-user` の env を汎用の `USER` から crate 固有の
+  `DSQL_SCHEMA_PG_USER` に変更。旧実装は `USER` (VM のログイン名 = `forge` 等) を
+  PG ユーザーとして採用してしまい、既定値 `postgres` が事実上機能しなかった
+  (消費側が全レシピで `--pg-user postgres` を渡す必要があった)。**`$USER` と PG
+  ユーザーが一致する運用に依存していた場合は挙動が変わる** (以後は `postgres` が
+  既定。従来どおりログイン名で繋ぐなら `DSQL_SCHEMA_PG_USER=$USER` か `--pg-user`)。
+  この変更で消費側の justfile から `--pg-user postgres` の引き回しを外せる
+- refactor: 文の分類 (CREATE TABLE / CREATE INDEX / …) を `StatementKind` に一元化。
+  transform / normalize_export / target_table が個別に prefix 判定しており、
+  判定のズレがそのままバグになる構造だった (上記の偽陰性バグがこの型)
+- refactor: `export --check` のドリフトを `std::process::exit(2)` の直呼びから
+  `DriftDetected` エラーに変更し、exit code への変換をエントリポイント
+  (`run_cli`) に集約。lib のコードがプロセスを殺さなくなる
+  (**exit 2 の契約は維持** = CI はそのまま)
 - fix: `normalize_export` の運用テーブル除去を「文の対象テーブル名の一致」に修正。
   旧実装は文全体の substring 判定だったため、名前に `schema_migrations` を含むだけの
   別テーブル (例: `user_schema_migrations_log`) や同名カラムを持つテーブルまで黙って

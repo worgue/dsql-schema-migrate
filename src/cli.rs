@@ -31,8 +31,12 @@ struct Cli {
 /// ローカル PostgreSQL（作業台）の接続情報。
 #[derive(Args)]
 struct LocalPg {
-    /// ローカル PG のユーザー（既定は $USER）
-    #[arg(long, env = "USER", default_value = "postgres")]
+    /// ローカル PG のユーザー（既定 `postgres`。env: `DSQL_SCHEMA_PG_USER`）
+    ///
+    /// env は crate 固有の名前にすること。汎用の `USER` を読むと、ログイン名
+    /// （VM では `forge` 等）が PG ユーザーとして採用されてしまい、既定値が
+    /// 事実上機能しない（消費側が全レシピで `--pg-user postgres` を渡す羽目になる）。
+    #[arg(long, env = "DSQL_SCHEMA_PG_USER", default_value = "postgres")]
     pg_user: String,
     #[arg(long, default_value = "127.0.0.1")]
     pg_host: String,
@@ -118,6 +122,35 @@ enum Command {
     /// 適用状況を表示する（env: DATABASE_URL または DSQL_HOST）
     Status,
 }
+
+/// `export --check` がドリフトを検出したことを表すエラー。
+///
+/// lib のコードからプロセスを殺さないために、exit code への変換は
+/// エントリポイント（[`crate::run_cli`]）だけが行う。CI がドリフトと他の失敗を
+/// 区別できるよう、この型に限り exit 2 を割り当てている（他のエラーは 1）。
+#[derive(Debug)]
+pub struct DriftDetected {
+    /// 比較対象のスキーマファイル
+    pub schema: PathBuf,
+    /// 実スキーマの export 内容を保存したファイル
+    pub drift_path: PathBuf,
+}
+
+/// [`DriftDetected`] に対応する終了コード。
+pub const DRIFT_EXIT_CODE: i32 = 2;
+
+impl std::fmt::Display for DriftDetected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ドリフト検出: 実スキーマが {} と一致しません。export を {} に保存しました (diff で比較を)",
+            self.schema.display(),
+            self.drift_path.display()
+        )
+    }
+}
+
+impl std::error::Error for DriftDetected {}
 
 /// CLI のエントリポイント（引数はプロセスの argv から読む）。
 ///
@@ -283,13 +316,13 @@ async fn export(
             return Ok(());
         }
         let drift_path = schema.with_extension("drift.sql");
-        std::fs::write(&drift_path, &normalized)?;
-        eprintln!(
-            "ドリフト検出: 実スキーマが {} と一致しません。export を {} に保存しました (diff で比較を)",
-            schema.display(),
-            drift_path.display()
-        );
-        std::process::exit(2);
+        std::fs::write(&drift_path, &normalized)
+            .with_context(|| format!("書き込みに失敗: {}", drift_path.display()))?;
+        return Err(DriftDetected {
+            schema: schema.to_owned(),
+            drift_path,
+        }
+        .into());
     }
     if let Some(path) = write {
         std::fs::write(path, &normalized)
@@ -336,4 +369,33 @@ async fn status() -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// clap の定義が壊れていないことを検査する（サブコマンド・既定値の取り違えを防ぐ）。
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn cli_定義は妥当() {
+        Cli::command().debug_assert();
+    }
+
+    /// pg_user の env は crate 固有であること。汎用の `USER` を読むと、
+    /// ログイン名が PG ユーザーとして採用され既定値 `postgres` が機能しなくなる。
+    #[test]
+    fn pg_user_の_env_は_crate_固有の名前() {
+        let cmd = Cli::command();
+        let diff = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "diff")
+            .expect("diff サブコマンドがある");
+        let pg_user = diff
+            .get_arguments()
+            .find(|a| a.get_id() == "pg_user")
+            .expect("--pg-user がある");
+        let env = pg_user.get_env().expect("env が設定されている");
+        assert_eq!(env, "DSQL_SCHEMA_PG_USER");
+    }
 }

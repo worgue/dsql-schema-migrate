@@ -24,9 +24,20 @@ pub mod psqldef;
 
 /// CLI を同期文脈から起動する（内部で tokio ランタイムを構築する）。
 /// 消費プロジェクトの薄い bin（`src/bin/dsql_schema_migrate.rs`）はこれを呼ぶだけでよい。
+///
+/// プロセスの終了コードへの変換はここだけが行う（lib のコードからプロセスを殺さない）。
+/// `export --check` のドリフトは exit 2、他のエラーは Err を返して呼び出し元の
+/// main が exit 1 にする。
 pub fn run_cli() -> anyhow::Result<()> {
-    tokio::runtime::Builder::new_multi_thread()
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(cli::run())
+        .block_on(cli::run());
+    if let Err(err) = &result
+        && err.downcast_ref::<cli::DriftDetected>().is_some()
+    {
+        eprintln!("{err}");
+        std::process::exit(cli::DRIFT_EXIT_CODE);
+    }
+    result
 }

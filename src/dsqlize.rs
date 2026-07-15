@@ -48,48 +48,93 @@ pub fn dsqlize(statements: &[String]) -> anyhow::Result<Vec<String>> {
     statements.iter().map(|s| transform(s)).collect()
 }
 
+/// 文の種別。
+///
+/// 分類はここに一元化する。transform（方言変換）・normalize_export（正規形化）・
+/// target_table（対象テーブル抽出）がそれぞれ独自に prefix 判定すると、判定のズレが
+/// そのままバグになる（運用テーブル除去が substring 判定でドリフト検査を偽陰性に
+/// していた事例がある）。
+///
+/// 判定が大文字小文字を区別するのは、psqldef が生成する DDL が常にこの表記の
+/// ためで、それ以外（手書きの小文字 DDL 等）は Other = fail-loud に倒す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatementKind {
+    CreateTable,
+    /// `CREATE INDEX` / `CREATE UNIQUE INDEX`
+    CreateIndex,
+    Drop,
+    AlterTableAddColumn,
+    /// 機械変換の対象外（手書きへ誘導する）
+    Other,
+}
+
+impl StatementKind {
+    fn of(stmt: &str) -> Self {
+        if stmt.starts_with("CREATE TABLE") {
+            Self::CreateTable
+        } else if stmt.starts_with("CREATE INDEX") || stmt.starts_with("CREATE UNIQUE INDEX") {
+            Self::CreateIndex
+        } else if stmt.starts_with("DROP TABLE") || stmt.starts_with("DROP INDEX") {
+            Self::Drop
+        } else if stmt.starts_with("ALTER TABLE") && stmt.contains("ADD COLUMN") {
+            Self::AlterTableAddColumn
+        } else {
+            Self::Other
+        }
+    }
+}
+
 /// 1 文を DSQL 方言へ変換する。
 fn transform(stmt: &str) -> anyhow::Result<String> {
     let stmt = stmt.trim();
-
-    if stmt.starts_with("CREATE TABLE") {
-        ensure_dsql_table(stmt)?;
-        return Ok(strip_using_btree(stmt));
-    }
-    if stmt.starts_with("CREATE UNIQUE INDEX") || stmt.starts_with("CREATE INDEX") {
-        // DSQL のインデックス作成は非同期のみ（CREATE INDEX ASYNC）
-        return Ok(strip_using_btree(stmt)
-            .replacen("CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX ASYNC ", 1)
-            .replacen("CREATE INDEX ", "CREATE INDEX ASYNC ", 1));
-    }
-    if stmt.starts_with("DROP TABLE") || stmt.starts_with("DROP INDEX") {
-        return Ok(stmt.to_owned());
-    }
-    if stmt.starts_with("ALTER TABLE") && stmt.contains("ADD COLUMN") {
-        // DSQL の ADD COLUMN は nullable・制約なしのみ。それ以外はテーブル再作成（手書き）
-        for forbidden in [
-            "NOT NULL",
-            "DEFAULT",
-            "REFERENCES",
-            "UNIQUE",
-            "PRIMARY KEY",
-            "CHECK",
-        ] {
-            if stmt.contains(forbidden) {
-                bail!(
-                    "DSQL は制約付き ADD COLUMN ({forbidden}) を適用できません。\
-                     テーブル再作成パターン (新テーブル作成 → データコピー → リネーム) で\
-                     手書きしてください:\n{stmt}"
-                );
-            }
+    match StatementKind::of(stmt) {
+        StatementKind::CreateTable => {
+            ensure_dsql_table(stmt)?;
+            Ok(strip_using_btree(stmt))
         }
-        return Ok(stmt.to_owned());
+        StatementKind::CreateIndex => Ok(to_async_index(&strip_using_btree(stmt))),
+        StatementKind::Drop => Ok(stmt.to_owned()),
+        StatementKind::AlterTableAddColumn => {
+            ensure_plain_add_column(stmt)?;
+            Ok(stmt.to_owned())
+        }
+        // psqldef は新規テーブルの CREATE TABLE を schema.sql の記述のまま echo するため、
+        // 小文字で書かれた DDL もここに落ちる（分類は psqldef の生成表記に合わせている）
+        StatementKind::Other => bail!(
+            "dsql-schema-migrate が機械変換できない文です。DSQL の DDL 制約を確認し、\
+             必要なら migration を手書きしてください (schema.sql の DDL は psqldef の\
+             表記 = キーワード大文字で書いてください):\n{stmt}"
+        ),
     }
+}
 
-    bail!(
-        "dsql-schema-migrate が機械変換できない文です。DSQL の DDL 制約を確認し、\
-         必要なら migration を手書きしてください:\n{stmt}"
-    );
+/// `CREATE [UNIQUE] INDEX` を DSQL の非同期形にする（DSQL のインデックス作成は ASYNC のみ）。
+/// UNIQUE 側が先に一致した場合、2 つ目の replacen は対象が残らず no-op になる。
+fn to_async_index(stmt: &str) -> String {
+    stmt.replacen("CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX ASYNC ", 1)
+        .replacen("CREATE INDEX ", "CREATE INDEX ASYNC ", 1)
+}
+
+/// ADD COLUMN が DSQL の許す形（nullable・制約なし）であることを確認する。
+/// それ以外はテーブル再作成パターンでの手書きへ誘導する。
+fn ensure_plain_add_column(stmt: &str) -> anyhow::Result<()> {
+    for forbidden in [
+        "NOT NULL",
+        "DEFAULT",
+        "REFERENCES",
+        "UNIQUE",
+        "PRIMARY KEY",
+        "CHECK",
+    ] {
+        if stmt.contains(forbidden) {
+            bail!(
+                "DSQL は制約付き ADD COLUMN ({forbidden}) を適用できません。\
+                 テーブル再作成パターン (新テーブル作成 → データコピー → リネーム) で\
+                 手書きしてください:\n{stmt}"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// CREATE TABLE が DSQL 非対応の要素を含まないことを確認する。
@@ -141,16 +186,10 @@ pub fn normalize_export(export: &str, from_dsql: bool) -> String {
     // 先に剥がすことで、運用テーブルへの index も対象テーブル名の一致で落とせる
     let statements: Vec<String> = split_statements(&strip_using_btree(export))
         .into_iter()
-        .map(|s| {
-            if s.starts_with("CREATE TABLE") {
-                sort_table_body(&s)
-            } else if from_dsql
-                && (s.starts_with("CREATE INDEX") || s.starts_with("CREATE UNIQUE INDEX"))
-            {
-                s.replacen("_index (", " (", 1)
-            } else {
-                s
-            }
+        .map(|s| match StatementKind::of(&s) {
+            StatementKind::CreateTable => sort_table_body(&s),
+            StatementKind::CreateIndex if from_dsql => s.replacen("_index (", " (", 1),
+            _ => s,
         })
         .filter(|s| !is_internal_table_statement(s))
         .collect();
@@ -175,12 +214,10 @@ fn is_internal_table_statement(stmt: &str) -> bool {
 /// 文の対象テーブル名（CREATE TABLE の対象 / CREATE INDEX の ON 先）を、
 /// schema 修飾と引用符を剥がした素の名前で取り出す。対象を持たない文は None。
 fn target_table(stmt: &str) -> Option<String> {
-    let rest = if let Some(rest) = stmt.strip_prefix("CREATE TABLE ") {
-        rest
-    } else if stmt.starts_with("CREATE INDEX") || stmt.starts_with("CREATE UNIQUE INDEX") {
-        stmt.split(" ON ").nth(1)?
-    } else {
-        return None;
+    let rest = match StatementKind::of(stmt) {
+        StatementKind::CreateTable => stmt.strip_prefix("CREATE TABLE ")?,
+        StatementKind::CreateIndex => stmt.split(" ON ").nth(1)?,
+        _ => return None,
     };
     let token = rest.split(|c: char| c.is_whitespace() || c == '(').next()?;
     let name = token.rsplit('.').next()?.trim_matches('"');
@@ -313,6 +350,27 @@ mod tests {
         );
         // 正規形は冪等（もう一度通しても変わらない）
         assert_eq!(normalize_export(&normalized, false), normalized);
+    }
+
+    #[test]
+    fn statement_kind_は文を分類する() {
+        use StatementKind::*;
+        for (stmt, want) in [
+            ("CREATE TABLE \"public\".\"a\" (\"id\" uuid)", CreateTable),
+            ("CREATE INDEX i ON public.a (c)", CreateIndex),
+            ("CREATE UNIQUE INDEX u ON public.a (c)", CreateIndex),
+            ("DROP TABLE \"public\".\"a\"", Drop),
+            ("DROP INDEX i", Drop),
+            (
+                "ALTER TABLE \"public\".\"a\" ADD COLUMN \"c\" text",
+                AlterTableAddColumn,
+            ),
+            ("ALTER TABLE a ALTER COLUMN c TYPE text", Other),
+            // psqldef の生成表記 (キーワード大文字) 以外は Other = fail-loud に倒す
+            ("create table a (id uuid)", Other),
+        ] {
+            assert_eq!(StatementKind::of(stmt), want, "分類が想定と違う: {stmt}");
+        }
     }
 
     #[test]
