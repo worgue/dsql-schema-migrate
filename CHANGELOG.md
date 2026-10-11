@@ -6,6 +6,10 @@ rev を進める判断材料はこのファイルと git log になる。
 
 ## 0.1.0 (未リリース)
 
+- deps: `aws-sdk-dsql` を `default-features = false` + `default-https-client` / `rt-tokio`
+  に変更。default の `rustls` feature が legacy TLS スタック (rustls 0.21 /
+  rustls-webpki 0.101、既知の脆弱性 advisory あり) を依存に持ち込んでいた。
+  消費側も同じ指定にしないと feature unification で legacy スタックが残る点に注意
 - **CLI 挙動変更**: `--pg-user` の env を汎用の `USER` から crate 固有の
   `DSQL_SCHEMA_PG_USER` に変更。旧実装は `USER` (VM のログイン名 = `forge` 等) を
   PG ユーザーとして採用してしまい、既定値 `postgres` が事実上機能しなかった

@@ -12,7 +12,9 @@ categories = ["database", "command-line-utilities"]
 [dependencies]
 anyhow = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-dsql = "1"
+# default の `rustls` feature は legacy TLS スタック (rustls 0.21 / rustls-webpki 0.101) を
+# 引き込むため外し、現行の HTTPS クライアント (default-https-client) だけを有効にする
+aws-sdk-dsql = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-types = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
