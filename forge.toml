@@ -1,0 +1,17 @@
+project_name = "dsql-schema-migrate"
+kits = ["core", "rust", "llmcore", "claude", "codex", "just", "depot"]
+[[mounts]]
+type = "overlay"
+path = "target"
+managed = "rust"
+
+[[mounts]]
+type = "inject"
+source = ".forge/vm/.claude/settings.local.json"
+target = ".claude/settings.local.json"
+is_file = true
+managed = "claude"
+[[mounts]]
+type = "overlay"
+path = ".forge/workspace"
+managed = "forge"
