@@ -295,7 +295,8 @@ fn take_identifier(s: &str) -> Option<(String, &str)> {
 /// DSQL の DROP CONSTRAINT が成功した種別だけ:
 ///
 /// - CHECK (`c`): 2026-08-03 に kadai の sandbox で実測
-/// - UNIQUE (`u`): 2026-10-15 に steeldoor の sandbox で実測（drop 後に catalog から消える）
+/// - UNIQUE (`u`): 2026-10-15 に steeldoor の sandbox で実測（drop 後に制約と背後の index が
+///   catalog から消え、重複挿入が通る = 意図どおり一意性が外れる）
 ///
 /// PRIMARY KEY (`p`) は同日の実測で `ERROR: unsupported ALTER TABLE DROP CONSTRAINT statement`
 /// と拒否されるため止める。FK (`f`) は DSQL に存在しえない。その他も未実測として止める。
