@@ -6,8 +6,8 @@
 //! `DSQL_SCHEMA_TEST_PG_USER`（既定 `postgres`）、ポートは 5432。psqldef は PATH から探す。
 //!
 //! 確認すること:
-//! - CHECK の drop は migration が生成され、その文を baseline に流すと制約が消える
-//! - PRIMARY KEY・UNIQUE の drop と ADD CONSTRAINT は種別を含むメッセージで止まり、
+//! - CHECK / UNIQUE の drop は migration が生成され、その文を baseline に流すと制約が消える
+//! - PRIMARY KEY の drop と ADD CONSTRAINT は種別を含むメッセージで止まり、
 //!   migration ファイルが作られない
 //! - `dsqlize_with_baseline` を実 PG に直接かけて、baseline に無い制約は Err、
 //!   引用識別子（大文字混じり）のテーブル名は catalog で解決できる
