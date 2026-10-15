@@ -13,9 +13,12 @@ rev を進める判断材料はこのファイルと git log になる。
   drop が通るか未実測のため fail-loud (実測後に allowlist を広げる予定)。baseline に無い
   制約名も fail-loud (migrations と schema.sql の不整合の検出)。`ADD CONSTRAINT` は従来どおり
   fail-loud。`--enable-drop` のゲートには載せない (データ喪失がない)。
-  公開 API は追加のみ: `dsqlize::parse_drop_constraint` / `check_drop_constraint_type` /
-  `verify_drop_constraints`。**lib として `dsqlize::dsqlize` を直接使う場合**、DROP CONSTRAINT
-  の種別検証は含まれないので `verify_drop_constraints` を baseline DB に対して呼ぶこと
+  公開 API は追加のみ: `dsqlize::dsqlize_with_baseline(db, statements)` (変換 + catalog 検証) /
+  `parse_drop_constraint` / `check_drop_constraint_type`。DB を触らない `dsqlize::dsqlize` は
+  従来どおり DROP CONSTRAINT を Err にする (種別を検証できない経路で通さない。lib 利用者は
+  `dsqlize_with_baseline` に乗り換えると通る)。機械変換する DROP CONSTRAINT はテーブル名の
+  schema 修飾が必須 (psqldef は常に付ける。無修飾を public と見なすと search_path 次第で
+  別スキーマの同名制約を落としうるため)
 - test: `diff` の結合テスト (`tests/diff_drop_constraint.rs`) を追加。ローカル PG + psqldef が
   要るため `DSQL_SCHEMA_TEST_PG_HOST` を設定したときだけ走る (未設定なら skip)
 

@@ -6,8 +6,8 @@
 //! 判定は保守的で、疑わしい文は誤検知側に倒す（誤検知なら手書きで通せる）。
 //!
 //! `ALTER TABLE ... DROP CONSTRAINT` は文の形だけでは DSQL で通るか決まらない
-//! （制約の種別による）ため、[`dsqlize`] は構文だけを検証して素通しし、種別の判定は
-//! baseline DB の catalog を引く [`verify_drop_constraints`] に分けている。
+//! （制約の種別による）ため、DB を触らない [`dsqlize`] では変換せず Err にし、
+//! baseline DB の catalog で種別を確認する [`dsqlize_with_baseline`] だけが通す。
 
 use anyhow::{Context, bail};
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement};
@@ -50,12 +50,31 @@ pub fn parse_dry_run(output: &str) -> DryRun {
 
 /// 素の PG 方言の文リストを DSQL 方言へ変換する。変換不能な文があればエラー。
 ///
-/// DB を触らない純関数。`ALTER TABLE ... DROP CONSTRAINT` は**構文のみ**検証して
-/// 素通しするため、この関数が成功しても DSQL で実行できる種別（CHECK）とは限らない。
-/// 生成した文を使う前に、baseline DB に対して [`verify_drop_constraints`] を呼ぶこと
-/// （CLI の `diff` はそうしている）。
+/// DB を触らない純関数。`ALTER TABLE ... DROP CONSTRAINT` は制約の種別（CHECK のみ可）を
+/// baseline の catalog で確認しないと DSQL で通るか決まらないため、ここでは Err にする。
+/// 通したい場合は [`dsqlize_with_baseline`] を使う（CLI の `diff` はそうしている）。
 pub fn dsqlize(statements: &[String]) -> anyhow::Result<Vec<String>> {
-    statements.iter().map(|s| transform(s)).collect()
+    statements.iter().map(|s| transform(s, false)).collect()
+}
+
+/// [`dsqlize`] に加えて、`DROP CONSTRAINT` を baseline DB の catalog で検証してから通す。
+///
+/// `db` は migrations/ を再生した baseline（CLI の `diff` では scratch DB）。
+/// 対象文の解析失敗・catalog に無い・CHECK 以外の種別はすべて Err（skip しない）。
+/// 検証は文の実行前の baseline に対して行うが、psqldef の 1 回の差分では同じテーブルの
+/// DROP TABLE / CREATE TABLE と DROP CONSTRAINT が同時に出ない（テーブルが落ちるなら
+/// その制約の DROP は出ず、新規テーブルは CREATE TABLE に制約を含めて出る）ため、
+/// 判定時点と実行時点の制約は一致する。
+pub async fn dsqlize_with_baseline(
+    db: &DatabaseConnection,
+    statements: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let out = statements
+        .iter()
+        .map(|s| transform(s, true))
+        .collect::<anyhow::Result<Vec<String>>>()?;
+    verify_drop_constraints(db, &out).await?;
+    Ok(out)
 }
 
 /// 文の種別。
@@ -74,8 +93,8 @@ enum StatementKind {
     CreateIndex,
     Drop,
     AlterTableAddColumn,
-    /// `ALTER TABLE ... DROP CONSTRAINT`。文の形は素通しだが、制約の種別は
-    /// [`verify_drop_constraints`] が baseline の catalog で検証する
+    /// `ALTER TABLE ... DROP CONSTRAINT`。文の形は素通しだが、制約の種別を
+    /// baseline の catalog で検証する必要があるため [`dsqlize_with_baseline`] だけが通す
     AlterTableDropConstraint,
     /// 機械変換の対象外（手書きへ誘導する）
     Other,
@@ -89,8 +108,7 @@ impl StatementKind {
             Self::CreateIndex
         } else if stmt.starts_with("DROP TABLE") || stmt.starts_with("DROP INDEX") {
             Self::Drop
-        } else if stmt.starts_with("ALTER TABLE") && stmt.contains(" DROP CONSTRAINT ") {
-            // 拾いすぎても parse_drop_constraint が厳密に読んで Err にする（fail-loud 側）
+        } else if is_alter_table_drop_constraint(stmt) {
             Self::AlterTableDropConstraint
         } else if stmt.starts_with("ALTER TABLE") && stmt.contains("ADD COLUMN") {
             Self::AlterTableAddColumn
@@ -100,8 +118,28 @@ impl StatementKind {
     }
 }
 
+/// `ALTER TABLE <table> DROP CONSTRAINT ` で始まる文か。テーブル識別子を読み飛ばしてから
+/// 判定するので、引用識別子の中に ` DROP CONSTRAINT ` が入っていても反応しない
+/// （`contains` 判定だと正当な ADD COLUMN を誤分類しうる）。
+fn is_alter_table_drop_constraint(stmt: &str) -> bool {
+    alter_table_action(stmt).is_some_and(|rest| rest.starts_with(" DROP CONSTRAINT "))
+}
+
+/// `ALTER TABLE <ident>[.<ident>]` を読み飛ばし、アクション部の残りを返す。読めなければ None。
+fn alter_table_action(stmt: &str) -> Option<&str> {
+    let rest = stmt.strip_prefix("ALTER TABLE ")?;
+    let (_, rest) = take_identifier(rest)?;
+    match rest.strip_prefix('.') {
+        Some(rest) => take_identifier(rest).map(|(_, rest)| rest),
+        None => Some(rest),
+    }
+}
+
 /// 1 文を DSQL 方言へ変換する。
-fn transform(stmt: &str) -> anyhow::Result<String> {
+///
+/// `with_baseline` は呼び出し元が変換後に baseline の catalog 検証（`verify_drop_constraints`）
+/// を行うことの宣言。false のとき DROP CONSTRAINT は Err にする（検証なしで通さない）。
+fn transform(stmt: &str, with_baseline: bool) -> anyhow::Result<String> {
     let stmt = stmt.trim();
     match StatementKind::of(stmt) {
         StatementKind::CreateTable => {
@@ -115,6 +153,13 @@ fn transform(stmt: &str) -> anyhow::Result<String> {
             Ok(stmt.to_owned())
         }
         StatementKind::AlterTableDropConstraint => {
+            if !with_baseline {
+                bail!(
+                    "DROP CONSTRAINT は制約の種別 (CHECK のみ可) を baseline の catalog で確認する\
+                     必要があるため、dsqlize() では変換しません。dsqlize_with_baseline() を\
+                     使ってください:\n{stmt}"
+                );
+            }
             // 形だけ検証する（方言変換は不要）。種別の allowlist は verify_drop_constraints
             parse_drop_constraint(stmt)?;
             Ok(stmt.to_owned())
@@ -160,7 +205,7 @@ fn ensure_plain_add_column(stmt: &str) -> anyhow::Result<()> {
 
 /// `ALTER TABLE <schema>.<table> DROP CONSTRAINT <constraint>` の対象。
 /// 各名前は引用符を剥がし `""` を `"` に戻した素の名前（catalog の relname / conname と
-/// 同じ形）。schema 省略時は `public`。
+/// 同じ形）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DropConstraintTarget {
     pub schema: String,
@@ -168,10 +213,13 @@ pub struct DropConstraintTarget {
     pub constraint: String,
 }
 
-/// `ALTER TABLE <table> DROP CONSTRAINT <constraint>` を厳密に読んで対象を取り出す。
+/// `ALTER TABLE <schema>.<table> DROP CONSTRAINT <constraint>` を厳密に読んで対象を取り出す。
 ///
 /// 受け付けるのはこの形だけ（psqldef の生成表記）。`IF EXISTS` / `CASCADE` /
 /// `RESTRICT`、複数アクションの ALTER、名前の後ろに何か続く形はすべて Err にする。
+/// schema 修飾も必須（psqldef は常に付ける）。無修飾を `public` と見なして検証すると、
+/// 出力 SQL は無修飾のままなので適用時の search_path 次第で別スキーマの同名制約を
+/// 落としうる。
 /// 識別子は引用付き（`"status check"` / `"items.status"` / `"a""b"` のように空白・
 /// ピリオド・二重引用符を含んでよい）と引用なし（PG と同じく小文字に畳む）の両方を
 /// 読む。空白分割やピリオド分割では引用識別子を正しく扱えないため、ここで一括して解析する。
@@ -188,15 +236,11 @@ pub fn parse_drop_constraint(stmt: &str) -> anyhow::Result<DropConstraintTarget>
     let rest = rest
         .strip_prefix("ALTER TABLE ")
         .ok_or_else(|| invalid("ALTER TABLE で始まらない"))?;
-    let (first, rest) = take_identifier(rest).ok_or_else(|| invalid("テーブル名を読めない"))?;
-    let (schema, table, rest) = match rest.strip_prefix('.') {
-        Some(rest) => {
-            let (table, rest) =
-                take_identifier(rest).ok_or_else(|| invalid("テーブル名を読めない"))?;
-            (first, table, rest)
-        }
-        None => ("public".to_owned(), first, rest),
-    };
+    let (schema, rest) = take_identifier(rest).ok_or_else(|| invalid("テーブル名を読めない"))?;
+    let rest = rest
+        .strip_prefix('.')
+        .ok_or_else(|| invalid("テーブル名に schema 修飾がない (\"public\".\"t\" の形が必要)"))?;
+    let (table, rest) = take_identifier(rest).ok_or_else(|| invalid("テーブル名を読めない"))?;
     let rest = rest
         .strip_prefix(" DROP CONSTRAINT ")
         .ok_or_else(|| invalid("テーブル名の後ろが DROP CONSTRAINT でない"))?;
@@ -285,15 +329,9 @@ pub fn check_drop_constraint_type(
     }
 }
 
-/// 変換後の文に含まれる `DROP CONSTRAINT` の対象を baseline DB の catalog で検証する。
-///
-/// `db` は migrations/ を再生した baseline（CLI の `diff` では scratch DB）。
-/// 対象文の解析失敗・catalog に無い・CHECK 以外の種別はすべて Err（skip しない）。
-/// 検証は文の実行前の baseline に対して行うが、psqldef の 1 回の差分では同じテーブルの
-/// DROP TABLE / CREATE TABLE と DROP CONSTRAINT が同時に出ない（テーブルが落ちるなら
-/// その制約の DROP は出ず、新規テーブルは CREATE TABLE に制約を含めて出る）ため、
-/// 判定時点と実行時点の制約は一致する。
-pub async fn verify_drop_constraints(
+/// 変換後の文に含まれる `DROP CONSTRAINT` の対象を baseline DB の catalog で検証する
+/// （[`dsqlize_with_baseline`] の後段）。解析失敗・catalog に無い・CHECK 以外は Err で、skip しない。
+async fn verify_drop_constraints(
     db: &DatabaseConnection,
     statements: &[String],
 ) -> anyhow::Result<()> {
@@ -543,22 +581,28 @@ mod tests {
     }
 
     #[test]
-    fn dsqlize_は_drop_constraint_を素通しする() {
+    fn dsqlize_は_baseline_なしでは_drop_constraint_を通さない() {
+        // 純関数の経路では種別を検証できないので、正しい形でも Err にして新 API へ誘導する
         let stmt = "ALTER TABLE \"public\".\"items\" DROP CONSTRAINT \"items_status_check\"";
-        let result = dsqlize(&stmts(&[stmt])).unwrap();
-        assert_eq!(result, stmts(&[stmt]));
+        let err = dsqlize(&stmts(&[stmt])).unwrap_err().to_string();
+        assert!(err.contains("dsqlize_with_baseline"), "誘導がない: {err}");
+        assert!(err.contains(stmt), "文が含まれない: {err}");
     }
 
     #[test]
-    fn dsqlize_は_drop_constraint_の対応外の形で止まる() {
-        for stmt in [
+    fn transform_は_baseline_ありなら_drop_constraint_の形だけ検証して素通しする() {
+        let stmt = "ALTER TABLE \"public\".\"items\" DROP CONSTRAINT \"items_status_check\"";
+        assert_eq!(transform(stmt, true).unwrap(), stmt);
+        for bad in [
             "ALTER TABLE \"public\".\"a\" DROP CONSTRAINT IF EXISTS \"c\"",
             "ALTER TABLE \"public\".\"a\" DROP CONSTRAINT \"c\" CASCADE",
             "ALTER TABLE \"public\".\"a\" DROP CONSTRAINT \"c\", ADD COLUMN \"x\" text",
+            "ALTER TABLE \"a\" DROP CONSTRAINT \"c\"",
+            // ADD CONSTRAINT は従来どおり Other
             "ALTER TABLE \"public\".\"a\" ADD CONSTRAINT \"c\" CHECK (x > 0)",
         ] {
-            let err = dsqlize(&stmts(&[stmt])).unwrap_err();
-            assert!(err.to_string().contains(stmt), "文が含まれない: {err}");
+            let err = transform(bad, true).unwrap_err();
+            assert!(err.to_string().contains(bad), "文が含まれない: {err}");
         }
     }
 
@@ -571,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_drop_constraint_は引用識別子と_schema_省略を読む() {
+    fn parse_drop_constraint_は引用識別子を読む() {
         for (stmt, want) in [
             (
                 "ALTER TABLE \"public\".\"items\" DROP CONSTRAINT \"items_status_check\"",
@@ -582,14 +626,10 @@ mod tests {
                 "ALTER TABLE \"public\".\"items\" DROP CONSTRAINT \"items_status_check\";",
                 target("public", "items", "items_status_check"),
             ),
-            // schema 省略は public。引用なしは小文字に畳む (PG の folding)
+            // 引用なしは小文字に畳む (PG の folding)
             (
-                "ALTER TABLE Items DROP CONSTRAINT Items_Check",
-                target("public", "items", "items_check"),
-            ),
-            (
-                "ALTER TABLE app.items DROP CONSTRAINT c1",
-                target("app", "items", "c1"),
+                "ALTER TABLE App.Items DROP CONSTRAINT Items_Check",
+                target("app", "items", "items_check"),
             ),
             // 引用識別子の中の空白・ピリオド・二重引用符
             (
@@ -608,18 +648,20 @@ mod tests {
     #[test]
     fn parse_drop_constraint_は対応外の形を拒否する() {
         for stmt in [
-            "ALTER TABLE a DROP CONSTRAINT IF EXISTS c",
-            "ALTER TABLE a DROP CONSTRAINT c CASCADE",
-            "ALTER TABLE a DROP CONSTRAINT c RESTRICT",
-            "ALTER TABLE a DROP CONSTRAINT c, DROP CONSTRAINT d",
-            "ALTER TABLE a ADD CONSTRAINT c CHECK (x > 0)",
-            "ALTER TABLE \"a DROP CONSTRAINT c", // 閉じていない引用
-            "ALTER TABLE \"\" DROP CONSTRAINT c", // 空の識別子
-            "ALTER TABLE 1a DROP CONSTRAINT c",  // 数字始まり
+            "ALTER TABLE s.a DROP CONSTRAINT IF EXISTS c",
+            "ALTER TABLE s.a DROP CONSTRAINT c CASCADE",
+            "ALTER TABLE s.a DROP CONSTRAINT c RESTRICT",
+            "ALTER TABLE s.a DROP CONSTRAINT c, DROP CONSTRAINT d",
+            "ALTER TABLE s.a ADD CONSTRAINT c CHECK (x > 0)",
+            "ALTER TABLE a DROP CONSTRAINT c", // schema 修飾なし
+            "ALTER TABLE \"a\" DROP CONSTRAINT \"c\"", // schema 修飾なし (引用付き)
+            "ALTER TABLE \"s\".\"a DROP CONSTRAINT c", // 閉じていない引用
+            "ALTER TABLE s.\"\" DROP CONSTRAINT c", // 空の識別子
+            "ALTER TABLE s.1a DROP CONSTRAINT c", // 数字始まり
             "ALTER TABLE a.b.c DROP CONSTRAINT d", // 3 段修飾
-            "ALTER TABLE a DROP CONSTRAINT",     // 制約名なし
-            "ALTER TABLE a DROP CONSTRAINT  c",  // 余分な空白 (psqldef の表記でない)
-            "alter table a drop constraint c",   // 小文字キーワード
+            "ALTER TABLE s.a DROP CONSTRAINT", // 制約名なし
+            "ALTER TABLE s.a DROP CONSTRAINT  c", // 余分な空白 (psqldef の表記でない)
+            "alter table s.a drop constraint c", // 小文字キーワード
         ] {
             assert!(
                 parse_drop_constraint(stmt).is_err(),
@@ -691,6 +733,11 @@ mod tests {
             ),
             // ADD CONSTRAINT は DSQL 非対応のまま (Other = fail-loud)
             ("ALTER TABLE a ADD CONSTRAINT c CHECK (x > 0)", Other),
+            // 引用識別子の中の " DROP CONSTRAINT " には反応しない (正当な ADD COLUMN)
+            (
+                "ALTER TABLE \"public\".\"items DROP CONSTRAINT archive\" ADD COLUMN \"x\" text",
+                AlterTableAddColumn,
+            ),
             ("ALTER TABLE a ALTER COLUMN c TYPE text", Other),
             // psqldef の生成表記 (キーワード大文字) 以外は Other = fail-loud に倒す
             ("create table a (id uuid)", Other),

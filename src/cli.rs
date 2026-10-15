@@ -222,10 +222,9 @@ async fn diff(
             parsed.skipped.join("\n")
         );
     }
-    let statements = dsqlize::dsqlize(&parsed.statements)?;
-    // DROP CONSTRAINT の種別 (CHECK のみ可) は baseline の catalog で判定する。
-    // 必ずファイル書き出しより前に行う (止まったときに migration を残さない)
-    dsqlize::verify_drop_constraints(&db, &statements).await?;
+    // DROP CONSTRAINT の種別 (CHECK のみ可) は baseline (= scratch DB) の catalog で判定する。
+    // ファイル書き出しより前に完了する (止まったときに migration を残さない)
+    let statements = dsqlize::dsqlize_with_baseline(&db, &parsed.statements).await?;
     if statements.is_empty() {
         println!(
             "差分なし: {} は migrations/ の再生結果と一致しています",

@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
 
 jobs:
@@ -20,3 +20,36 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: テスト (unit test は PostgreSQL 不要)
         run: cargo test
+
+  # diff の結合テスト (tests/)。unit test と違いローカル PG + psqldef が要るため、ここで必ず走らせる
+  # (env 未設定だとテストは skip して成功扱いになるので、このジョブで env を与える。
+  # psqldef や PG が無ければ CLI の起動が失敗してテストが落ちる = 黙って skip にならない)
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: psqldef を導入
+        run: |
+          curl -sSL -o /tmp/psqldef.tar.gz \
+            https://github.com/sqldef/sqldef/releases/download/v3.11.26/psqldef_linux_amd64.tar.gz
+          tar xzf /tmp/psqldef.tar.gz -C /tmp psqldef
+          sudo install -m 755 /tmp/psqldef /usr/local/bin/psqldef
+          psqldef --version
+      - name: 結合テスト (ローカル PG + psqldef)
+        run: cargo test --test diff_drop_constraint -- --nocapture
+        env:
+          DSQL_SCHEMA_TEST_PG_HOST: 127.0.0.1
