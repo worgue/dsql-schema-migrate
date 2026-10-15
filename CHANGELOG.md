@@ -6,6 +6,19 @@ rev を進める判断材料はこのファイルと git log になる。
 
 ## 0.1.0 (未リリース)
 
+- feature: `ALTER TABLE ... DROP CONSTRAINT` を機械変換の対象に追加 (kadai からの依頼。
+  CHECK 制約を落としてアプリ層 enum に一本化する定型変更が diff → apply の通常サイクルに乗る)。
+  文の形は素通しだが、`diff` が baseline (migrations/ の再生結果) の `pg_constraint` で
+  制約の種別を引き、**CHECK (`contype = 'c'`) だけ**通す。PRIMARY KEY / UNIQUE は DSQL で
+  drop が通るか未実測のため fail-loud (実測後に allowlist を広げる予定)。baseline に無い
+  制約名も fail-loud (migrations と schema.sql の不整合の検出)。`ADD CONSTRAINT` は従来どおり
+  fail-loud。`--enable-drop` のゲートには載せない (データ喪失がない)。
+  公開 API は追加のみ: `dsqlize::parse_drop_constraint` / `check_drop_constraint_type` /
+  `verify_drop_constraints`。**lib として `dsqlize::dsqlize` を直接使う場合**、DROP CONSTRAINT
+  の種別検証は含まれないので `verify_drop_constraints` を baseline DB に対して呼ぶこと
+- test: `diff` の結合テスト (`tests/diff_drop_constraint.rs`) を追加。ローカル PG + psqldef が
+  要るため `DSQL_SCHEMA_TEST_PG_HOST` を設定したときだけ走る (未設定なら skip)
+
 - 運用: 開発体制を「消費側 VM からの共同編集」から「この repo 専用環境で feedback を
   受けて開発する」形に変更。変更依頼は kadai の dsql-schema-migrate 宛 feedback へ。
   crate の API / CLI には変更なし

@@ -6,7 +6,9 @@
 //!   [`dsqlize::normalize_export`] に通した形で管理する）
 //! - diff 生成: migrations/ をローカル PG の scratch DB に再生（baseline）し、
 //!   `psqldef --dry-run` の出力を [`dsqlize`] で DSQL 方言へ機械変換する。
-//!   変換できない文（制約付き ADD COLUMN 等）は fail-loud で止まるので手書きに切り替える
+//!   変換できない文（制約付き ADD COLUMN、ADD CONSTRAINT 等）は fail-loud で止まるので
+//!   手書きに切り替える。`DROP CONSTRAINT` は baseline の catalog で種別を確認し、
+//!   DSQL で drop できると実測済みの CHECK だけ通す（[`dsqlize::verify_drop_constraints`]）
 //! - 適用: [`applier`] が migrations/*.sql を 1 文ずつ autocommit で実行する
 //!   （DSQL は 1 トランザクション 1 DDL。適用履歴は `schema_migrations` テーブル）。
 //!   ローカル PG へは `CREATE INDEX ASYNC` を同期 `CREATE INDEX` に変換して適用するため、

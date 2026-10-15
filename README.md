@@ -13,7 +13,9 @@ Aurora DSQL は「PostgreSQL 互換」だが、FK 制約なし・`ON CONFLICT` �
 - 信頼の源は `schema.sql`（素の PG 方言。psqldef export の正規形で管理する）
 - **diff 生成**: `migrations/` をローカル PostgreSQL の scratch DB に再生（baseline）し、
   `psqldef --dry-run` の出力を DSQL 方言へ機械変換する。変換できない文
-  （制約付き ADD COLUMN 等）は fail-loud で止まるので手書きに切り替える
+  （制約付き ADD COLUMN、ADD CONSTRAINT 等）は fail-loud で止まるので手書きに切り替える。
+  `DROP CONSTRAINT` は baseline の catalog で制約の種別を確認し、DSQL で drop できると
+  実測済みの CHECK 制約だけ通す（PRIMARY KEY / UNIQUE は未実測のため止める）
 - **適用**: applier が `migrations/*.sql` を 1 文ずつ autocommit で実行する
   （適用履歴は `schema_migrations` テーブル）。ローカル PG へは `CREATE INDEX ASYNC` を
   同期 `CREATE INDEX` に変換して適用するため、テスト DB 構築と本番適用が同一コードになる
@@ -76,7 +78,8 @@ lib として使う場合のクレート名は `dsql_schema_migrate`。
 2. `dsql-schema-migrate diff <name>` — baseline（migrations/ の再生結果）との差分から
    `migrations/<ts>_<name>.sql` が生成される。機械変換できない変更は fail-loud で
    止まるので、テーブル再作成パターン（新テーブル → データコピー → リネーム）を
-   手書きする。破壊的変更（DROP）は既定でエラー。意図したものだけ `--enable-drop` を付ける
+   手書きする。破壊的変更（DROP TABLE 等）は既定でエラー。意図したものだけ `--enable-drop` を付ける
+   （CHECK 制約の `DROP CONSTRAINT` はデータ喪失がないため、ゲートなしで生成される）
 3. 生成された migration をレビューする（runner への登録作業は不要。migrations/
    ディレクトリが正）
 4. `DSQL_HOST=<endpoint> dsql-schema-migrate apply` で適用 → `status` で
@@ -98,6 +101,13 @@ dsql_schema_migrate::applier::apply_migrations(
     &dsql_schema_migrate::applier::ApplyOptions { is_dsql: false, record_history: false },
 ).await?;
 ```
+
+## 開発
+
+`cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を通す。unit test は
+ローカル PostgreSQL なしで動く。`diff` の結合テスト（`tests/`）はローカル PG と PATH の psqldef が
+要るため、`DSQL_SCHEMA_TEST_PG_HOST`（例: `127.0.0.1`。ユーザーは `DSQL_SCHEMA_TEST_PG_USER`、
+既定 `postgres`）を設定したときだけ走り、未設定なら skip する。
 
 ## License
 
