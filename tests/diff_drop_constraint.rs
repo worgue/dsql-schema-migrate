@@ -148,7 +148,7 @@ fn without(line_contains: &str) -> String {
 }
 
 #[test]
-fn diff_は_check_の_drop_constraint_だけ機械変換する() {
+fn diff_は_check_と_unique_の_drop_constraint_だけ機械変換する() {
     let Some(env) = Env::detect() else {
         eprintln!(
             "skip: DSQL_SCHEMA_TEST_PG_HOST が未設定 (ローカル PG + psqldef が要る結合テスト)"
