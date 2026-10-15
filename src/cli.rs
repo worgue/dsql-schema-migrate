@@ -222,7 +222,7 @@ async fn diff(
             parsed.skipped.join("\n")
         );
     }
-    // DROP CONSTRAINT の種別 (CHECK のみ可) は baseline (= scratch DB) の catalog で判定する。
+    // DROP CONSTRAINT の種別 (CHECK / UNIQUE のみ可) は baseline (= scratch DB) の catalog で判定する。
     // ファイル書き出しより前に完了する (止まったときに migration を残さない)
     let statements = dsqlize::dsqlize_with_baseline(&db, &parsed.statements).await?;
     if statements.is_empty() {

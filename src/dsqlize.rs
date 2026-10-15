@@ -50,7 +50,7 @@ pub fn parse_dry_run(output: &str) -> DryRun {
 
 /// 素の PG 方言の文リストを DSQL 方言へ変換する。変換不能な文があればエラー。
 ///
-/// DB を触らない純関数。`ALTER TABLE ... DROP CONSTRAINT` は制約の種別（CHECK のみ可）を
+/// DB を触らない純関数。`ALTER TABLE ... DROP CONSTRAINT` は制約の種別（CHECK / UNIQUE のみ可）を
 /// baseline の catalog で確認しないと DSQL で通るか決まらないため、ここでは Err にする。
 /// 通したい場合は [`dsqlize_with_baseline`] を使う（CLI の `diff` はそうしている）。
 pub fn dsqlize(statements: &[String]) -> anyhow::Result<Vec<String>> {
@@ -155,7 +155,7 @@ fn transform(stmt: &str, with_baseline: bool) -> anyhow::Result<String> {
         StatementKind::AlterTableDropConstraint => {
             if !with_baseline {
                 bail!(
-                    "DROP CONSTRAINT は制約の種別 (CHECK のみ可) を baseline の catalog で確認する\
+                    "DROP CONSTRAINT は制約の種別 (CHECK / UNIQUE のみ可) を baseline の catalog で確認する\
                      必要があるため、dsqlize() では変換しません。dsqlize_with_baseline() を\
                      使ってください:\n{stmt}"
                 );
@@ -291,10 +291,14 @@ fn take_identifier(s: &str) -> Option<(String, &str)> {
 
 /// DROP CONSTRAINT の対象が DSQL で drop できる種別か判定する（allowlist）。
 ///
-/// `contype` は `pg_constraint.contype`（baseline に無ければ None）。
-/// 通すのは CHECK (`c`) だけ。DSQL で drop が通ることを 2026-08-03 に sandbox で実測済み。
-/// UNIQUE (`u`) / PRIMARY KEY (`p`) は実測待ち（steeldoor の sandbox に依頼中）のため
-/// 保守的に止める。FK (`f`) は DSQL に存在しえない。
+/// `contype` は `pg_constraint.contype`（baseline に無ければ None）。通すのは実測で
+/// DSQL の DROP CONSTRAINT が成功した種別だけ:
+///
+/// - CHECK (`c`): 2026-08-03 に kadai の sandbox で実測
+/// - UNIQUE (`u`): 2026-10-15 に steeldoor の sandbox で実測（drop 後に catalog から消える）
+///
+/// PRIMARY KEY (`p`) は同日の実測で `ERROR: unsupported ALTER TABLE DROP CONSTRAINT statement`
+/// と拒否されるため止める。FK (`f`) は DSQL に存在しえない。その他も未実測として止める。
 pub fn check_drop_constraint_type(
     target: &DropConstraintTarget,
     contype: Option<&str>,
@@ -305,11 +309,14 @@ pub fn check_drop_constraint_type(
         constraint,
     } = target;
     match contype {
-        Some("c") => Ok(()),
+        Some("c" | "u") => Ok(()),
+        Some("p") => bail!(
+            "PRIMARY KEY 制約 {constraint} (テーブル {schema}.{table}) の DROP CONSTRAINT は \
+             DSQL が受け付けません (実測: ERROR: unsupported ALTER TABLE DROP CONSTRAINT statement)。\
+             テーブル再作成パターン (新テーブル作成 → データコピー → リネーム) で手書きしてください"
+        ),
         Some(other) => {
             let kind = match other {
-                "p" => "PRIMARY KEY",
-                "u" => "UNIQUE",
                 "f" => "FOREIGN KEY",
                 "x" => "EXCLUDE",
                 "t" => "CONSTRAINT TRIGGER",
@@ -318,7 +325,7 @@ pub fn check_drop_constraint_type(
             };
             bail!(
                 "{kind} 制約 {constraint} (テーブル {schema}.{table}) の DROP CONSTRAINT は \
-                 DSQL で通るか未検証のため機械変換しません。CHECK 制約のみ対応しています。\
+                 DSQL で通るか未検証のため機械変換しません。CHECK / UNIQUE 制約のみ対応しています。\
                  必要なら migration を手書きしてください"
             )
         }
@@ -330,7 +337,7 @@ pub fn check_drop_constraint_type(
 }
 
 /// 変換後の文に含まれる `DROP CONSTRAINT` の対象を baseline DB の catalog で検証する
-/// （[`dsqlize_with_baseline`] の後段）。解析失敗・catalog に無い・CHECK 以外は Err で、skip しない。
+/// （[`dsqlize_with_baseline`] の後段）。解析失敗・catalog に無い・allowlist 外の種別は Err で、skip しない。
 async fn verify_drop_constraints(
     db: &DatabaseConnection,
     statements: &[String],
@@ -671,12 +678,12 @@ mod tests {
     }
 
     #[test]
-    fn check_drop_constraint_type_は_check_だけ通す() {
+    fn check_drop_constraint_type_は_check_と_unique_だけ通す() {
         let t = target("public", "items", "items_status_check");
         assert!(check_drop_constraint_type(&t, Some("c")).is_ok());
+        assert!(check_drop_constraint_type(&t, Some("u")).is_ok());
         for (contype, kind) in [
             (Some("p"), "PRIMARY KEY"),
-            (Some("u"), "UNIQUE"),
             (Some("f"), "FOREIGN KEY"),
             (Some("x"), "EXCLUDE"),
             (Some("?"), "不明な種別"),
@@ -690,6 +697,14 @@ mod tests {
                 "制約名が含まれない: {err}"
             );
         }
+        // PK は DSQL の実測エラー文を添えて手書きへ誘導する
+        let err = check_drop_constraint_type(&t, Some("p"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unsupported ALTER TABLE DROP CONSTRAINT"),
+            "{err}"
+        );
         let err = check_drop_constraint_type(&t, None)
             .unwrap_err()
             .to_string();
