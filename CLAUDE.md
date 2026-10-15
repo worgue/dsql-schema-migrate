@@ -5,17 +5,21 @@
 
 ## このリポジトリの位置づけ
 
-Aurora DSQL 向けスキーマ管理 crate。複数プロジェクト（kikiwake / kadai）の開発 VM から
-`/shared/dsql-schema-migrate` マウント経由で**直接編集**される共同管理 repo です。
+Aurora DSQL 向けスキーマ管理 crate。この repo 専用の開発環境で、消費側プロジェクト
+（kikiwake / kadai 等）からの feedback を受けて開発します。消費側の VM からこの repo を
+直接編集することはしません。
 
-## 共同編集の運用ルール
+## 開発の運用ルール
 
-- **push は人間が行う**。VM の Claude は commit まで（push しないこと）
+- 不具合報告・機能要望・変更依頼は、kadai の dsql-schema-migrate 宛 feedback で受ける。
+  依頼の意図に疑問があれば、実装前に送り手のプロジェクトへ feedback で確認する
+- ブランチは `dev` が既定。LLM は `dev` へ commit して push してよい。
+  `main` / `stg` / `prod` への昇格は人間が行う（force push・ブランチ削除は禁止）
 - 消費側プロジェクトは git 依存 + rev pin でこの repo を使う。**変更を入れたら
   CHANGELOG.md に追記**すること（消費側が rev を進めるかの判断材料になる）。
   破壊的変更（公開 API / CLI の互換を壊す変更）は Cargo.toml の version も上げる
-- 他プロジェクトの編集で HEAD が進んでいたら、差分と CHANGELOG を読んでから作業する。
-  変更意図に疑問があれば相手プロジェクトへ直接フィードバックする
+- feedback 起点の変更を push したら、依頼元へ対応内容と commit hash を返す
+  （rev を進める判断を相手に委ねる）
 - 編集後は必ず `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を
   通すこと（unit test はローカル PostgreSQL なしで動く）
 
@@ -28,6 +32,10 @@ GitHub 上の**公開 repo**です。以下をコード・コメント・コミ�
 - タスク管理 ID・AWS アカウント ID・エンドポイント・secret
 
 プロジェクト名 kikiwake / kadai への言及は可。
+
+kadai の作業コピー（`/kadai`）と `forge.local.toml` / `.envrc.local` は `.gitignore` 済み。
+作業コピーには他プロジェクトとやり取りした feedback の本文が入るため、絶対に commit しない
+（commit 前に `git status` に現れないことを確認する）。
 
 ## 設計の要点
 

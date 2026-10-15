@@ -15,3 +15,6 @@ managed = "claude"
 type = "overlay"
 path = ".forge/workspace"
 managed = "forge"
+
+[git]
+github_token_type = "app"

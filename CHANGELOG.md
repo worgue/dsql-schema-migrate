@@ -6,6 +6,10 @@ rev を進める判断材料はこのファイルと git log になる。
 
 ## 0.1.0 (未リリース)
 
+- 運用: 開発体制を「消費側 VM からの共同編集」から「この repo 専用環境で feedback を
+  受けて開発する」形に変更。変更依頼は kadai の dsql-schema-migrate 宛 feedback へ。
+  crate の API / CLI には変更なし
+
 - deps: `aws-sdk-dsql` を `default-features = false` + `default-https-client` / `rt-tokio`
   に変更。default の `rustls` feature が legacy TLS スタック (rustls 0.21 /
   rustls-webpki 0.101、既知の脆弱性 advisory あり) を依存に持ち込んでいた。
