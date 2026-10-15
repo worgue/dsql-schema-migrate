@@ -31,6 +31,7 @@ const INIT: &str = r#"CREATE TABLE "public"."items" (
 "#;
 
 const DROP_CHECK: &str = "ALTER TABLE \"public\".\"items\" DROP CONSTRAINT \"items_status_check\"";
+const DROP_UNIQUE: &str = "ALTER TABLE \"public\".\"items\" DROP CONSTRAINT \"items_code_key\"";
 
 struct Env {
     host: String,
@@ -156,50 +157,46 @@ fn diff_は_check_の_drop_constraint_だけ機械変換する() {
     };
     let baseline = env.migrations();
 
-    // CHECK を外す → DROP CONSTRAINT だけの migration が生成される
-    let (ok, stdout, stderr) = env.diff("drop_check", &without("items_status_check"));
-    assert!(ok, "CHECK の drop は通るべき: {stderr}");
-    assert!(stdout.contains(DROP_CHECK), "生成文が違う: {stdout}");
-    let generated: Vec<String> = env
-        .migrations()
-        .into_iter()
-        .filter(|n| !baseline.contains(n))
-        .collect();
-    assert_eq!(generated.len(), 1, "migration が 1 件増える: {generated:?}");
-    let path = env.project.join("migrations").join(&generated[0]);
-    let content = fs::read_to_string(&path).unwrap();
-    let body: Vec<&str> = content
-        .lines()
-        .filter(|l| !l.is_empty() && !l.starts_with("--"))
-        .collect();
-    assert_eq!(
-        body,
-        [format!("{DROP_CHECK};")],
-        "ファイル内容が違う: {content}"
-    );
-    fs::remove_file(&path).unwrap();
-
-    // UNIQUE / PRIMARY KEY の drop は種別を含むメッセージで止まり、ファイルを残さない
-    for (name, line, kind) in [
-        ("drop_unique", "items_code_key", "UNIQUE"),
-        ("drop_pk", "items_pkey", "PRIMARY KEY"),
+    // CHECK / UNIQUE を外す → その DROP CONSTRAINT だけの migration が生成される
+    for (name, line, stmt) in [
+        ("drop_check", "items_status_check", DROP_CHECK),
+        ("drop_unique", "items_code_key", DROP_UNIQUE),
     ] {
-        let (ok, _, stderr) = env.diff(name, &without(line));
-        assert!(!ok, "{kind} の drop は止まるべき");
-        assert!(
-            stderr.contains(kind),
-            "種別 {kind} がメッセージに無い: {stderr}"
-        );
-        assert!(
-            stderr.contains(line),
-            "制約名 {line} がメッセージに無い: {stderr}"
-        );
-        assert_eq!(
-            env.migrations(),
-            baseline,
-            "止まったのに migration が残っている"
-        );
+        let (ok, stdout, stderr) = env.diff(name, &without(line));
+        assert!(ok, "{name} は通るべき: {stderr}");
+        assert!(stdout.contains(stmt), "生成文が違う: {stdout}");
+        let generated: Vec<String> = env
+            .migrations()
+            .into_iter()
+            .filter(|n| !baseline.contains(n))
+            .collect();
+        assert_eq!(generated.len(), 1, "migration が 1 件増える: {generated:?}");
+        let path = env.project.join("migrations").join(&generated[0]);
+        let content = fs::read_to_string(&path).unwrap();
+        let body: Vec<&str> = content
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with("--"))
+            .collect();
+        assert_eq!(body, [format!("{stmt};")], "ファイル内容が違う: {content}");
+        fs::remove_file(&path).unwrap();
     }
+
+    // PRIMARY KEY の drop は DSQL の実測エラー文を含むメッセージで止まり、ファイルを残さない
+    let (ok, _, stderr) = env.diff("drop_pk", &without("items_pkey"));
+    assert!(!ok, "PRIMARY KEY の drop は止まるべき");
+    assert!(
+        stderr.contains("PRIMARY KEY") && stderr.contains("items_pkey"),
+        "種別・制約名がメッセージに無い: {stderr}"
+    );
+    assert!(
+        stderr.contains("unsupported ALTER TABLE DROP CONSTRAINT"),
+        "DSQL の実測エラー文が無い: {stderr}"
+    );
+    assert_eq!(
+        env.migrations(),
+        baseline,
+        "止まったのに migration が残っている"
+    );
 
     // ADD CONSTRAINT は従来どおり fail-loud
     let added = INIT.replace(
@@ -243,16 +240,14 @@ fn diff_は_check_の_drop_constraint_だけ機械変換する() {
             .expect("引用識別子の CHECK は通るべき");
         assert_eq!(out, [mixed]);
 
-        // 生成した文を baseline に流すと、対象の CHECK だけが消える
+        // 生成した文を baseline に流すと、対象の制約だけが消える
         assert_eq!(
             env.constraint_names(&db, "items").await,
             ["items_code_key", "items_pkey", "items_status_check"]
         );
         db.execute_unprepared(DROP_CHECK).await.unwrap();
-        assert_eq!(
-            env.constraint_names(&db, "items").await,
-            ["items_code_key", "items_pkey"]
-        );
+        db.execute_unprepared(DROP_UNIQUE).await.unwrap();
+        assert_eq!(env.constraint_names(&db, "items").await, ["items_pkey"]);
         drop(db);
         env.drop_scratch().await;
     });
