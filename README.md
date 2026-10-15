@@ -107,7 +107,28 @@ dsql_schema_migrate::applier::apply_migrations(
 `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を通す。unit test は
 ローカル PostgreSQL なしで動く。`diff` の結合テスト（`tests/`）はローカル PG と PATH の psqldef が
 要るため、`DSQL_SCHEMA_TEST_PG_HOST`（例: `127.0.0.1`。ユーザーは `DSQL_SCHEMA_TEST_PG_USER`、
-既定 `postgres`）を設定したときだけ走り、未設定なら skip する。
+既定 `postgres`）を設定したときだけ走り、未設定なら skip する。CI では PostgreSQL service を立てて
+必ず走らせている。
+
+開発 VM（Ubuntu）でローカルに走らせる手順（結合テストと `diff` の実機確認用）:
+
+```sh
+# PostgreSQL 16 を入れ、TCP (127.0.0.1) をパスワードなし (trust) で受けるようにする
+sudo apt-get install -y postgresql
+sudo sed -i 's|^\(host\s\+all\s\+all\s\+127.0.0.1/32\s\+\)scram-sha-256|\1trust|' /etc/postgresql/16/main/pg_hba.conf
+sudo pg_ctlcluster 16 main reload   # 停止していれば start
+
+# psqldef (sqldef) のリリース tarball を PATH に置く (version は CI の ci.yml と揃える)
+curl -sSL -o /tmp/psqldef.tar.gz \
+  https://github.com/sqldef/sqldef/releases/download/v3.11.26/psqldef_linux_amd64.tar.gz
+tar xzf /tmp/psqldef.tar.gz -C /tmp psqldef && install -m 755 /tmp/psqldef ~/.local/bin/psqldef
+
+DSQL_SCHEMA_TEST_PG_HOST=127.0.0.1 cargo test --test diff_drop_constraint
+```
+
+DSQL 本体（AWS）はこの repo の開発環境には無い。DSQL 固有の挙動（DDL が通るか等）の実測は、
+DSQL の sandbox を持つ消費側 project に feedback で手順を書いて依頼し、結果をコード内コメントと
+CHANGELOG に「どの project の sandbox で何日に実測」として残す（固有情報は書かない）。
 
 ## License
 
