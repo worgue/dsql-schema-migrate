@@ -40,10 +40,23 @@ fn main() -> anyhow::Result<()> {
 }
 ```
 
-バイナリだけ欲しい場合は `cargo install` でも導入できる:
+バイナリだけ欲しい場合は GitHub Releases のビルド済み binary を使う (tag `X.Y.Z` ごとに
+`x86_64-unknown-linux-gnu` / `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` /
+`aarch64-apple-darwin` の tar.gz と sha256 を置いている。リリース手順は
+[docs/releasing.md](docs/releasing.md)):
 
 ```sh
-cargo install --git https://github.com/worgue/dsql-schema-migrate.git --rev <rev> dsql-schema-migrate
+ver=X.Y.Z target=x86_64-unknown-linux-musl
+curl -sSL -o /tmp/dsm.tar.gz \
+  https://github.com/worgue/dsql-schema-migrate/releases/download/${ver}/dsql-schema-migrate-${target}.tar.gz
+tar xzf /tmp/dsm.tar.gz -C /tmp
+install -m 755 /tmp/dsql-schema-migrate-${target}/dsql-schema-migrate ~/.local/bin/
+```
+
+ソースからビルドする場合は `cargo install` でも導入できる (`--rev` の代わりに `--tag X.Y.Z` も可):
+
+```sh
+cargo install --locked --git https://github.com/worgue/dsql-schema-migrate.git --tag X.Y.Z dsql-schema-migrate
 ```
 
 前提ツール: psqldef（diff / export に使用。version pin での導入を推奨）と
