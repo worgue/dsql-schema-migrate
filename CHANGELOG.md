@@ -1,8 +1,12 @@
 # Changelog
 
-破壊的変更を入れたら必ずここに書き、Cargo.toml の version を上げること
-（semver。1.0 未満は minor が breaking の扱い）。消費側は rev pin なので、
-rev を進める判断材料はこのファイルと git log になる。
+変更を入れたら必ず `[Unreleased]` に書き、破壊的変更は **破壊的** と明記して
+Cargo.toml の version を上げること（semver。1.0 未満は minor が breaking の扱い）。
+消費側は rev / tag pin なので、進める判断材料はこのファイルと git log になる。
+リリース時に `[Unreleased]` を `[X.Y.Z](…/releases/tag/X.Y.Z) - 日付` の節へ確定し、
+`release.yml` がその節を GitHub Release の本文にする（手順は docs/releasing.md）。
+
+## [Unreleased]
 
 ## 0.1.0 (未リリース)
 
@@ -26,6 +30,11 @@ rev を進める判断材料はこのファイルと git log になる。
   受けて開発する」形に変更。変更依頼は kadai の dsql-schema-migrate 宛 feedback へ。
   crate の API / CLI には変更なし
 
+- release: tag `X.Y.Z` の push で GitHub Releases にビルド済み binary
+  (`x86_64-unknown-linux-gnu` / `x86_64-unknown-linux-musl` / `aarch64-unknown-linux-musl` /
+  `aarch64-apple-darwin` の tar.gz + sha256) を置く `release.yml` を追加 (worgue からの依頼。
+  消費側の GHA で `cargo install --git` に 5 分近くかかっていたのを curl 1 本にする)。
+  手順は docs/releasing.md。lib として使う側は git 依存を `tag = "X.Y.Z"` で pin できる
 - **deps (破壊的)**: `sea-orm` を 1 系から **2 系** (2.0.4) に更新 (steeldoor からの依頼。
   消費側の Dependabot が sea-orm 2.0 へ上げると、`applier::apply_migrations(db: &DatabaseConnection, ..)`
   に渡す消費側の `DatabaseConnection` と型が食い違ってコンパイルできなくなるため)。

@@ -1,0 +1,110 @@
+name: release
+# tag push (例: 0.2.0) で各 target の binary をビルドし、GitHub Releases に tar.gz と
+# sha256 を置く。消費側は `cargo install --git` の代わりに curl 1 本で導入できる
+# (リリース手順は docs/releasing.md)。
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+permissions: {}
+env:
+  BIN: dsql-schema-migrate
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check tag matches Cargo.toml version
+        run: |
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$version" != "$GITHUB_REF_NAME" ]; then
+            echo "Cargo.toml の version $version が tag $GITHUB_REF_NAME と一致しません" >&2
+            exit 1
+          fi
+          echo "ok: $GITHUB_REF_NAME"
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            apt: musl-tools
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            apt: musl-tools
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: musl ツールチェーンを導入
+        if: matrix.apt
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ${{ matrix.apt }}
+      - name: ビルド
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: アーカイブを作成
+        run: |
+          set -eu
+          name="${BIN}-${{ matrix.target }}"
+          mkdir -p "dist/${name}"
+          cp "target/${{ matrix.target }}/release/${BIN}" README.md LICENSE "dist/${name}/"
+          tar czf "dist/${name}.tar.gz" -C dist "${name}"
+          rm -r "dist/${name}"
+          (cd dist && shasum -a 256 "${name}.tar.gz" > "${name}.tar.gz.sha256")
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Release の作成と asset の upload
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: CHANGELOG から Release 本文を切り出す
+        run: |
+          set -eu
+          awk -v tag="$GITHUB_REF_NAME" '
+            $0 ~ "^## \\[" tag "\\]" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' > notes.md
+          if [ ! -s notes.md ]; then
+            echo "CHANGELOG.md に '## [$GITHUB_REF_NAME]' の節がありません" >&2
+            exit 1
+          fi
+          cat notes.md
+      - name: GitHub Release を作成 (既存なら asset を差し替え)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md dist/*
+          fi

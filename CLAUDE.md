@@ -20,6 +20,9 @@ Aurora DSQL 向けスキーマ管理 crate。この repo 専用の開発環境�
   破壊的変更（公開 API / CLI の互換を壊す変更）は Cargo.toml の version も上げる
 - feedback 起点の変更を push したら、依頼元へ対応内容と commit hash を返す
   （rev を進める判断を相手に委ねる）
+- リリース（tag `X.Y.Z` push → GitHub Releases に binary）は LLM が行う。手順は
+  `docs/releasing.md`。magic-pocket と同じ流儀（`v` なし tag、dev 上で tag、
+  `:bookmark: X.Y.Z リリース` commit）
 - 編集後は必ず `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を
   通すこと（unit test はローカル PostgreSQL なしで動く）
 
