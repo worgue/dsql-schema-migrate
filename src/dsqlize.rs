@@ -364,7 +364,7 @@ async fn lookup_contype(
          JOIN pg_namespace n ON t.relnamespace = n.oid \
          WHERE n.nspname = $1 AND t.relname = $2 AND c.conname = $3";
     let row = db
-        .query_one(Statement::from_sql_and_values(
+        .query_one_raw(Statement::from_sql_and_values(
             DbBackend::Postgres,
             SQL,
             [

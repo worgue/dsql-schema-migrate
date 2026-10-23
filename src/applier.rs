@@ -154,7 +154,7 @@ pub async fn apply_migrations(
         )
         .await?;
         applied = db
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 db.get_database_backend(),
                 "SELECT version FROM schema_migrations",
             ))
@@ -163,7 +163,7 @@ pub async fn apply_migrations(
             .filter_map(|row| row.try_get::<String>("", "version").ok())
             .collect();
         progress = db
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 db.get_database_backend(),
                 "SELECT version, applied_count FROM schema_migration_progress",
             ))
@@ -293,7 +293,7 @@ mod tests {
     //     未設定なら skip。schema_migrations / schema_migration_progress / cp_* を掃除する）---
 
     async fn count(db: &DatabaseConnection, sql: &str) -> i64 {
-        db.query_all(Statement::from_string(db.get_database_backend(), sql))
+        db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
             .await
             .unwrap()
             .first()
@@ -323,7 +323,7 @@ mod tests {
     }
 
     async fn progress_count(db: &DatabaseConnection, version: &str) -> Option<usize> {
-        db.query_all(Statement::from_string(
+        db.query_all_raw(Statement::from_string(
             db.get_database_backend(),
             format!(
                 "SELECT applied_count FROM schema_migration_progress WHERE version='{version}'"

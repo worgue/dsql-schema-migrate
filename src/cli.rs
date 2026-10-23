@@ -341,7 +341,7 @@ async fn status() -> anyhow::Result<()> {
     let db = connect::connect(&source).await?;
     let backend = db.get_database_backend();
     let rows = db
-        .query_all(Statement::from_string(
+        .query_all_raw(Statement::from_string(
             backend,
             "SELECT version, applied_at::text AS applied_at FROM schema_migrations ORDER BY version",
         ))
@@ -355,7 +355,7 @@ async fn status() -> anyhow::Result<()> {
     }
     if source.is_dsql() {
         let rows = db
-            .query_all(Statement::from_string(
+            .query_all_raw(Statement::from_string(
                 backend,
                 "SELECT status::text AS status, count(*) AS count FROM sys.jobs GROUP BY status",
             ))
