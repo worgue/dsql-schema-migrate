@@ -8,7 +8,7 @@ Cargo.toml の version を上げること（semver。1.0 未満は minor が bre
 
 ## [Unreleased]
 
-## 0.1.0 (未リリース)
+## [0.1.0](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.1.0) - 2026-10-23
 
 - feature: `ALTER TABLE ... DROP CONSTRAINT` を機械変換の対象に追加 (kadai からの依頼。
   CHECK 制約を落としてアプリ層 enum に一本化する定型変更が diff → apply の通常サイクルに乗る)。
