@@ -1,6 +1,6 @@
 [package]
 name = "dsql-schema-migrate"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Aurora DSQL 向けスキーマ管理 (psqldef diff + DSQL 方言変換 + 自前 applier)"
 license = "MIT"
