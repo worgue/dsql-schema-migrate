@@ -8,6 +8,11 @@ Cargo.toml の version を上げること（semver。1.0 未満は minor が bre
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.2.0) - 2026-10-23
+
+- feature: CLI に `--version` / `-V` を追加 (Cargo.toml の version を表示)。配布 binary の
+  導入確認 (`dsql-schema-migrate --version` が tag と一致するか) に使う
+
 ## [0.1.0](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.1.0) - 2026-10-23
 
 - feature: `ALTER TABLE ... DROP CONSTRAINT` を機械変換の対象に追加 (kadai からの依頼。
