@@ -26,6 +26,14 @@ rev を進める判断材料はこのファイルと git log になる。
   受けて開発する」形に変更。変更依頼は kadai の dsql-schema-migrate 宛 feedback へ。
   crate の API / CLI には変更なし
 
+- **deps (破壊的)**: `sea-orm` を 1 系から **2 系** (2.0.4) に更新 (steeldoor からの依頼。
+  消費側の Dependabot が sea-orm 2.0 へ上げると、`applier::apply_migrations(db: &DatabaseConnection, ..)`
+  に渡す消費側の `DatabaseConnection` と型が食い違ってコンパイルできなくなるため)。
+  公開 API の型は `sea_orm::DatabaseConnection` のまま変わらないが、**sea-orm 1 系に留まる
+  消費側はこの rev に進めない** (逆に 2 系へ上げた消費側は進める必要がある)。
+  内部では `query_all` / `query_one` に素の `Statement` を渡していた箇所を sea-orm 2.0 の
+  `query_all_raw` / `query_one_raw` に改名しただけで、挙動の変更はない。
+  同時に sqlx が 0.8 → 0.9 に上がる (Cargo.lock)
 - deps: `aws-sdk-dsql` を `default-features = false` + `default-https-client` / `rt-tokio`
   に変更。default の `rustls` feature が legacy TLS スタック (rustls 0.21 /
   rustls-webpki 0.101、既知の脆弱性 advisory あり) を依存に持ち込んでいた。

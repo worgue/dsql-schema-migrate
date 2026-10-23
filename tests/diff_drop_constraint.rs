@@ -105,7 +105,7 @@ impl Env {
 
     async fn constraint_names(&self, db: &DatabaseConnection, table: &str) -> Vec<String> {
         let rows = db
-            .query_all(Statement::from_sql_and_values(
+            .query_all_raw(Statement::from_sql_and_values(
                 sea_orm::DbBackend::Postgres,
                 "SELECT c.conname FROM pg_constraint c JOIN pg_class t ON c.conrelid = t.oid \
                  WHERE t.relname = $1 ORDER BY c.conname",

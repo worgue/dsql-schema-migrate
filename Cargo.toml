@@ -19,6 +19,6 @@ aws-types = "1"
 chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
-sea-orm = { version = "1", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
 urlencoding = "2"
