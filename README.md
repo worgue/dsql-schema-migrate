@@ -139,6 +139,17 @@ tar xzf /tmp/psqldef.tar.gz -C /tmp psqldef && install -m 755 /tmp/psqldef ~/.lo
 DSQL_SCHEMA_TEST_PG_HOST=127.0.0.1 cargo test --test diff_drop_constraint
 ```
 
+配布 binary（`release.yml` の musl 静的ビルド）をローカルで再現する手順。aws-lc-sys の C ビルドが
+入るが、`musl-tools`（musl-gcc）と `cmake` があれば特別な `CC` 指定なしで通る。VM の arch と同じ
+target しかリンクできない（arm64 VM なら `aarch64-unknown-linux-musl`。x86_64 向けは GHA 側で確認）:
+
+```sh
+sudo apt-get install -y musl-tools cmake
+rustup target add aarch64-unknown-linux-musl     # x86_64 の VM なら x86_64-unknown-linux-musl
+cargo build --release --locked --target aarch64-unknown-linux-musl
+target/aarch64-unknown-linux-musl/release/dsql-schema-migrate --version
+```
+
 DSQL 本体（AWS）はこの repo の開発環境には無い。DSQL 固有の挙動（DDL が通るか等）の実測は、
 DSQL の sandbox を持つ消費側 project に feedback で手順を書いて依頼し、結果をコード内コメントと
 CHANGELOG に「どの project の sandbox で何日に実測」として残す（固有情報は書かない）。

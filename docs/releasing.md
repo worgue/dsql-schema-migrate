@@ -15,6 +15,10 @@ tag は dev 上の commit に打つ。リリース作業は LLM が行う)。
 | `aarch64-unknown-linux-musl` | ubuntu-24.04-arm | 静的リンク。arm64 の VM / コンテナ (forge VM 等) |
 | `aarch64-apple-darwin` | macos-latest | op の host (Apple Silicon) |
 
+musl target は `musl-tools`（musl-gcc）だけで通る（依存の aws-lc-sys は cmake + musl-gcc で
+自前ビルドされる。特別な `CC` 指定は不要。runner には cmake が最初から入っている）。musl の
+ビルドが落ちたら、まず runner image の cmake / musl-tools の有無を疑う。ローカル再現は README「開発」。
+
 ## バージョンの決め方 (SemVer)
 
 - **バグ修正のみ** → patch (例: `0.2.1` → `0.2.2`)
