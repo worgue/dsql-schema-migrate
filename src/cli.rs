@@ -21,6 +21,7 @@ use crate::{dsqlize, psqldef};
 #[derive(Parser)]
 #[command(
     name = "dsql-schema-migrate",
+    version,
     about = "Aurora DSQL 向けスキーマ管理 (psqldef diff + 自前 applier)"
 )]
 struct Cli {
