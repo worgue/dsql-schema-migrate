@@ -8,6 +8,8 @@ Cargo.toml の version を上げること（semver。1.0 未満は minor が bre
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.3.0) - 2026-10-27
+
 - feature: applier が DSQL の OCC 競合 (SQLSTATE `OC000` / `OC001` / `40001`) で失敗した文を
   指数バックオフ (250ms から倍々、上限 4s、最大 6 回 = 合計約 12 秒) で自動再試行する
   (tsumugi からの依頼。新しいクラスターへの初回 bootstrap で `CREATE INDEX ASYNC` のジョブが
