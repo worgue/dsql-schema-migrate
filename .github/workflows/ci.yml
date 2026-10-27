@@ -21,7 +21,7 @@ jobs:
       - name: テスト (unit test は PostgreSQL 不要)
         run: cargo test
 
-  # diff の結合テスト (tests/)。unit test と違いローカル PG + psqldef が要るため、ここで必ず走らせる
+  # diff の結合テスト (tests/) と applier の DB テスト。unit test と違いローカル PG + psqldef が要るため、ここで必ず走らせる
   # (env 未設定だとテストは skip して成功扱いになるので、このジョブで env を与える。
   # psqldef や PG が無ければ CLI の起動が失敗してテストが落ちる = 黙って skip にならない)
   integration:
@@ -50,6 +50,6 @@ jobs:
           sudo install -m 755 /tmp/psqldef /usr/local/bin/psqldef
           psqldef --version
       - name: 結合テスト (ローカル PG + psqldef)
-        run: cargo test --test diff_drop_constraint -- --nocapture
+        run: cargo test -- --nocapture
         env:
           DSQL_SCHEMA_TEST_PG_HOST: 127.0.0.1

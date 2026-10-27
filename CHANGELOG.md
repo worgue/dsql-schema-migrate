@@ -8,6 +8,19 @@ Cargo.toml の version を上げること（semver。1.0 未満は minor が bre
 
 ## [Unreleased]
 
+- feature: applier が DSQL の OCC 競合 (SQLSTATE `OC000` / `OC001` / `40001`) で失敗した文を
+  指数バックオフ (250ms から倍々、上限 4s、最大 6 回 = 合計約 12 秒) で自動再試行する
+  (tsumugi からの依頼。新しいクラスターへの初回 bootstrap で `CREATE INDEX ASYNC` のジョブが
+  schema を更新している最中に次の DDL を出すと `OC001` schema has been updated by another
+  transaction で止まっていた)。1 文 1 autocommit なので失敗文は巻き戻っており、同じ文の
+  再実行は安全。再試行のたびに stderr へ 1 行出す。上限まで解消しなければ「少し待って再実行
+  すると失敗した文から再開する」旨をエラーに含めて止まる。CLI の `apply` は OCC 以外の失敗でも
+  同じ再開の案内を付ける。公開 API は追加のみ (`applier::OCC_SQLSTATES` / `OCC_MAX_RETRIES` /
+  `occ_backoff` / `is_occ_conflict` / `sqlstate_of`)。`ApplyOptions` は変えていない
+- test: applier の DB テストが `DSQL_SCHEMA_TEST_PG_HOST` (+ `_USER`) からも接続先を組めるように
+  し、CI の結合テスト job で `cargo test` 全体を走らせる (従来は `diff` の結合テストだけで、
+  applier のチェックポイント再開テストは CI で走っていなかった)
+
 ## [0.2.0](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.2.0) - 2026-10-23
 
 - feature: CLI に `--version` / `-V` を追加 (Cargo.toml の version を表示)。配布 binary の

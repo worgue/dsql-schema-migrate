@@ -11,6 +11,8 @@
 //!   DSQL で drop できると実測済みの CHECK だけ通す（[`dsqlize::dsqlize_with_baseline`]）
 //! - 適用: [`applier`] が migrations/*.sql を 1 文ずつ autocommit で実行する
 //!   （DSQL は 1 トランザクション 1 DDL。適用履歴は `schema_migrations` テーブル）。
+//!   OCC 競合（`OC001` 等。ASYNC index ジョブと次の DDL の衝突）は失敗した文だけを
+//!   指数バックオフで再試行する。
 //!   ローカル PG へは `CREATE INDEX ASYNC` を同期 `CREATE INDEX` に変換して適用するため、
 //!   テスト DB 構築と本番適用が同一コードになる
 //!

@@ -100,7 +100,11 @@ lib として使う場合のクレート名は `dsql_schema_migrate`。
 5. entity 生成が要るプロジェクトは `rebuild-lab` で lab DB を再構築してから生成する
 
 途中で apply が失敗しても、文単位チェックポイントにより再実行は失敗した文から再開する
-（先頭からのやり直しで `already exists` に詰まらない）。
+（先頭からのやり直しで `already exists` に詰まらない）。DSQL の OCC 競合（`OC001`
+schema has been updated by another transaction 等。新しいクラスターに多数の
+`CREATE TABLE` / `CREATE INDEX ASYNC` を続けて流す初回 bootstrap で、ASYNC index ジョブの
+schema 更新と次の DDL が衝突して起きる）は、失敗した文だけを指数バックオフで自動再試行する
+（最大 6 回・合計約 12 秒。stderr に再試行ログを出す）。それでも解消しなければ再開の案内付きで止まる。
 
 ## テストからの利用
 
@@ -118,8 +122,9 @@ dsql_schema_migrate::applier::apply_migrations(
 ## 開発
 
 `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を通す。unit test は
-ローカル PostgreSQL なしで動く。`diff` の結合テスト（`tests/`）はローカル PG と PATH の psqldef が
-要るため、`DSQL_SCHEMA_TEST_PG_HOST`（例: `127.0.0.1`。ユーザーは `DSQL_SCHEMA_TEST_PG_USER`、
+ローカル PostgreSQL なしで動く。`diff` の結合テスト（`tests/`）と applier の DB テスト
+（チェックポイント再開・OCC 再試行）はローカル PG（`diff` は PATH の psqldef も）が要るため、
+`DSQL_SCHEMA_TEST_PG_HOST`（例: `127.0.0.1`。ユーザーは `DSQL_SCHEMA_TEST_PG_USER`、
 既定 `postgres`）を設定したときだけ走り、未設定なら skip する。CI では PostgreSQL service を立てて
 必ず走らせている。
 
@@ -136,7 +141,7 @@ curl -sSL -o /tmp/psqldef.tar.gz \
   https://github.com/sqldef/sqldef/releases/download/v3.11.26/psqldef_linux_amd64.tar.gz
 tar xzf /tmp/psqldef.tar.gz -C /tmp psqldef && install -m 755 /tmp/psqldef ~/.local/bin/psqldef
 
-DSQL_SCHEMA_TEST_PG_HOST=127.0.0.1 cargo test --test diff_drop_constraint
+DSQL_SCHEMA_TEST_PG_HOST=127.0.0.1 cargo test
 ```
 
 配布 binary（`release.yml` の musl 静的ビルド）をローカルで再現する手順。aws-lc-sys の C ビルドが
