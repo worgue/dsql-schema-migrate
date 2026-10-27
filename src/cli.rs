@@ -260,7 +260,11 @@ async fn apply(migrations_dir: &Path) -> anyhow::Result<()> {
             record_history: true,
         },
     )
-    .await?;
+    .await
+    .context(
+        "apply が途中で失敗しました (文単位チェックポイントにより、原因を解消して再実行すると\
+         失敗した文から再開します。先頭からのやり直しにはなりません)",
+    )?;
     if applied.is_empty() {
         println!("適用済み: 新しいマイグレーションはありません");
     } else {

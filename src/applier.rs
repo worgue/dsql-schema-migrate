@@ -11,12 +11,19 @@
 //!   初めて記録し、進捗行を消す。diff 用 baseline 再生では `record_history=false` で
 //!   履歴・進捗テーブルを作らない
 //! - 非 DSQL（ローカル PG）へは `CREATE INDEX ASYNC` を同期 `CREATE INDEX` に変換する
+//! - **OCC 競合の文単位再試行**: DSQL は楽観的同時実行制御なので、`CREATE INDEX ASYNC` の
+//!   ジョブが schema を更新している最中に次の DDL を出すと `OC001`（schema has been updated
+//!   by another transaction）で落ちる（新しいクラスターに多数の DDL を続けて流す初回
+//!   bootstrap で起きやすい）。1 文 1 autocommit なので失敗した文は丸ごと巻き戻っており、
+//!   その文だけを指数バックオフで再試行する（[`OCC_SQLSTATES`] / [`OCC_MAX_RETRIES`]）。
+//!   再試行で解消しなければエラーに「再実行すると失敗した文から再開する」旨を含めて止まる
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Context;
-use sea_orm::{ConnectionTrait, DatabaseConnection, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbErr, RuntimeErr, Statement};
 
 /// 1 つのマイグレーションファイル。
 pub struct Migration {
@@ -89,11 +96,82 @@ pub fn to_local_pg(stmt: &str) -> String {
         .replace("CREATE INDEX ASYNC", "CREATE INDEX")
 }
 
+/// OCC 競合として文単位で再試行する SQLSTATE。
+///
+/// - `OC000`: 他トランザクションとの変更競合（DSQL 固有）
+/// - `OC001`: schema が他トランザクションに更新された（DSQL 固有。ASYNC index のジョブが
+///   schema を更新している最中に次の DDL を出すと起きる）
+/// - `40001`: serialization_failure（PostgreSQL 標準。DSQL も同じ意味で返しうる）
+pub const OCC_SQLSTATES: &[&str] = &["OC000", "OC001", "40001"];
+
+/// OCC 競合で同じ文を再試行する回数の上限（初回実行を除く）。
+pub const OCC_MAX_RETRIES: u32 = 6;
+
+/// `retry` 回目（0 始まり）の再試行前に待つ時間。250ms から倍々で 4s を上限とする
+/// （[`OCC_MAX_RETRIES`] 回で合計約 12 秒。ASYNC index ジョブの schema 更新は数秒で収まる想定）。
+pub fn occ_backoff(retry: u32) -> Duration {
+    let ms = 250u64 << retry.min(4);
+    Duration::from_millis(ms.min(4000))
+}
+
+/// `sqlstate` が OCC 競合（再試行で解消しうるエラー）かを返す。
+pub fn is_occ_conflict(sqlstate: &str) -> bool {
+    OCC_SQLSTATES.contains(&sqlstate)
+}
+
+/// [`DbErr`] から SQLSTATE を取り出す（driver 由来の DB エラーでなければ `None`）。
+pub fn sqlstate_of(err: &DbErr) -> Option<String> {
+    match err {
+        DbErr::Exec(RuntimeErr::SqlxError(e)) | DbErr::Query(RuntimeErr::SqlxError(e)) => {
+            match &**e {
+                sea_orm::sqlx::Error::Database(db_err) => db_err.code().map(|c| c.into_owned()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// 1 文を autocommit で実行する。OCC 競合（[`OCC_SQLSTATES`]）なら `max_retries` 回まで
+/// [`occ_backoff`] で待って同じ文をやり直す。それ以外のエラーは即座に返す。
+async fn execute_with_retries(
+    db: &DatabaseConnection,
+    sql: &str,
+    max_retries: u32,
+) -> anyhow::Result<()> {
+    let head = sql.lines().next().unwrap_or("");
+    let mut retry = 0;
+    loop {
+        let err = match db.execute_unprepared(sql).await {
+            Ok(_) => return Ok(()),
+            Err(err) => err,
+        };
+        let occ = sqlstate_of(&err).filter(|code| is_occ_conflict(code));
+        match occ {
+            Some(code) if retry < max_retries => {
+                let wait = occ_backoff(retry);
+                retry += 1;
+                eprintln!(
+                    "OCC 競合 ({code}) のため {}ms 待って再試行 {retry}/{max_retries}: {head}",
+                    wait.as_millis()
+                );
+                tokio::time::sleep(wait).await;
+            }
+            Some(code) => {
+                return Err(anyhow::Error::new(err).context(format!(
+                    "SQL 実行に失敗 (OCC 競合 {code} が {max_retries} 回の再試行でも解消しませんでした。\
+                     少し待って再実行すると失敗した文から再開します): {head}"
+                )));
+            }
+            None => {
+                return Err(anyhow::Error::new(err).context(format!("SQL 実行に失敗: {head}")));
+            }
+        }
+    }
+}
+
 async fn execute(db: &DatabaseConnection, sql: &str) -> anyhow::Result<()> {
-    db.execute_unprepared(sql)
-        .await
-        .with_context(|| format!("SQL 実行に失敗: {}", sql.lines().next().unwrap_or("")))?;
-    Ok(())
+    execute_with_retries(db, sql, OCC_MAX_RETRIES).await
 }
 
 /// SQL 文字列リテラルに埋め込む値をエスケープする（version = ファイル名。
@@ -269,6 +347,32 @@ mod tests {
         assert_eq!(sql_literal("plain"), "plain");
     }
 
+    #[test]
+    fn is_occ_conflict_は_dsql_の_occ_系と_40001_だけ真() {
+        assert!(is_occ_conflict("OC000"));
+        assert!(is_occ_conflict("OC001"));
+        assert!(is_occ_conflict("40001"));
+        assert!(!is_occ_conflict("42P01")); // undefined_table
+        assert!(!is_occ_conflict("42P07")); // duplicate_table
+        assert!(!is_occ_conflict(""));
+    }
+
+    #[test]
+    fn occ_backoff_は倍々で_4秒を上限にする() {
+        assert_eq!(occ_backoff(0), Duration::from_millis(250));
+        assert_eq!(occ_backoff(1), Duration::from_millis(500));
+        assert_eq!(occ_backoff(3), Duration::from_millis(2000));
+        assert_eq!(occ_backoff(4), Duration::from_millis(4000));
+        assert_eq!(occ_backoff(5), Duration::from_millis(4000));
+        assert_eq!(occ_backoff(100), Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn sqlstate_of_は_driver_由来でないエラーには_none() {
+        assert_eq!(sqlstate_of(&DbErr::Custom("x".into())), None);
+        assert_eq!(sqlstate_of(&DbErr::RecordNotFound("x".into())), None);
+    }
+
     /// 再開は「先頭から start 文を飛ばす」だけ、という位置ロジックを純粋に確認する。
     #[test]
     fn 再開位置は先頭から_start_文を飛ばす() {
@@ -289,8 +393,31 @@ mod tests {
         );
     }
 
-    // --- DB を使う統合テスト（DSQL_SCHEMA_TEST_PG_URL の指す使い捨て PG に対して実行。
-    //     未設定なら skip。schema_migrations / schema_migration_progress / cp_* を掃除する）---
+    // --- DB を使う統合テスト（使い捨てのローカル PG に対して実行。接続先は
+    //     DSQL_SCHEMA_TEST_PG_URL、無ければ DSQL_SCHEMA_TEST_PG_HOST (+ _USER。tests/ と同じ
+    //     規約) から組む。どちらも未設定なら skip。
+    //     schema_migrations / schema_migration_progress / cp_* を掃除する）---
+
+    fn test_pg_url() -> Option<String> {
+        if let Ok(url) = std::env::var("DSQL_SCHEMA_TEST_PG_URL") {
+            return Some(url);
+        }
+        let host = std::env::var("DSQL_SCHEMA_TEST_PG_HOST").ok()?;
+        let user = std::env::var("DSQL_SCHEMA_TEST_PG_USER").unwrap_or_else(|_| "postgres".into());
+        Some(crate::connect::local_url(&user, &host, 5432, "postgres"))
+    }
+
+    async fn test_db() -> Option<DatabaseConnection> {
+        let Some(url) = test_pg_url() else {
+            eprintln!("DSQL_SCHEMA_TEST_PG_URL / DSQL_SCHEMA_TEST_PG_HOST 未設定のため skip");
+            return None;
+        };
+        Some(
+            crate::connect::connect(&crate::connect::DbSource::Direct(url))
+                .await
+                .unwrap(),
+        )
+    }
 
     async fn count(db: &DatabaseConnection, sql: &str) -> i64 {
         db.query_all_raw(Statement::from_string(db.get_database_backend(), sql))
@@ -352,13 +479,9 @@ mod tests {
 
     #[tokio::test]
     async fn 部分失敗した_migration_は失敗文から再開する() {
-        let Ok(url) = std::env::var("DSQL_SCHEMA_TEST_PG_URL") else {
-            eprintln!("DSQL_SCHEMA_TEST_PG_URL 未設定のため skip");
+        let Some(db) = test_db().await else {
             return;
         };
-        let db = crate::connect::connect(&crate::connect::DbSource::Direct(url))
-            .await
-            .unwrap();
         cleanup(&db).await;
         let opts = ApplyOptions {
             is_dsql: false,
@@ -411,5 +534,63 @@ mod tests {
         assert_eq!(progress_count(&db, "v1").await, None);
 
         cleanup(&db).await;
+    }
+
+    /// OCC 競合を模した文（SQLSTATE OC001 を RAISE する DO ブロック）が、再試行の途中で
+    /// 通るようになれば成功し、上限まで通らなければ再開の案内付きで失敗することを確認する。
+    /// 「何回目で通るか」は sequence（非トランザクショナルなので RAISE で巻き戻らない）で数える。
+    #[tokio::test]
+    async fn occ_競合は文単位で再試行し_上限で再開の案内付きで止まる() {
+        let Some(db) = test_db().await else {
+            return;
+        };
+        execute(&db, "DROP SEQUENCE IF EXISTS cp_occ_seq")
+            .await
+            .unwrap();
+        execute(&db, "CREATE SEQUENCE cp_occ_seq").await.unwrap();
+        // 1〜2 回目は OC001、3 回目で通る (再試行 2 回で解消)
+        let flaky = "DO $$ BEGIN IF nextval('cp_occ_seq') < 3 THEN \
+                     RAISE EXCEPTION 'schema has been updated by another transaction' \
+                     USING ERRCODE = 'OC001'; END IF; END $$";
+        execute_with_retries(&db, flaky, OCC_MAX_RETRIES)
+            .await
+            .expect("2 回の再試行で通るはず");
+        assert_eq!(
+            count(&db, "SELECT last_value AS c FROM cp_occ_seq").await,
+            3
+        );
+
+        // 常に OC001 なら上限で止まり、エラーに再開の案内が入る
+        let always = "DO $$ BEGIN RAISE EXCEPTION 'conflict' USING ERRCODE = 'OC001'; END $$";
+        let err = execute_with_retries(&db, always, 1).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("OCC 競合 OC001"), "{msg}");
+        assert!(msg.contains("失敗した文から再開"), "{msg}");
+
+        // OCC 以外のエラーは再試行せず即座に返す (sequence は進まない)
+        execute(&db, "SELECT setval('cp_occ_seq', 1)")
+            .await
+            .unwrap();
+        let other = "DO $$ BEGIN PERFORM nextval('cp_occ_seq'); \
+                     RAISE EXCEPTION 'nope' USING ERRCODE = '42P01'; END $$";
+        let err = execute_with_retries(&db, other, OCC_MAX_RETRIES)
+            .await
+            .unwrap_err();
+        assert!(!format!("{err:#}").contains("OCC 競合"));
+        assert_eq!(
+            count(&db, "SELECT last_value AS c FROM cp_occ_seq").await,
+            2
+        );
+
+        // SQLSTATE の取り出しそのものも実 driver で確認する
+        let raw = db
+            .execute_unprepared("SELECT * FROM cp_no_such_table")
+            .await
+            .unwrap_err();
+        assert_eq!(sqlstate_of(&raw).as_deref(), Some("42P01"));
+
+        execute(&db, "DROP SEQUENCE IF EXISTS cp_occ_seq")
+            .await
+            .unwrap();
     }
 }
