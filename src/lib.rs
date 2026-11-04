@@ -15,6 +15,8 @@
 //!   指数バックオフで再試行する。
 //!   ローカル PG へは `CREATE INDEX ASYNC` を同期 `CREATE INDEX` に変換して適用するため、
 //!   テスト DB 構築と本番適用が同一コードになる
+//! - テーブル rename: psqldef の diff は DROP + CREATE と見るため、[`rename`] が baseline の
+//!   catalog から RENAME 形（テーブル → PK / UNIQUE 制約 → index）の migration を機械生成する
 //!
 //! baseline を「git HEAD の schema.sql」ではなく「migrations/ の再生結果」にしているのは、
 //! migrations ⊕ 生成 diff = schema.sql の整合が diff のたびに検査されるようにするため
@@ -25,6 +27,7 @@ pub mod cli;
 pub mod connect;
 pub mod dsqlize;
 pub mod psqldef;
+pub mod rename;
 
 /// CLI を同期文脈から起動する（内部で tokio ランタイムを構築する）。
 /// 消費プロジェクトの薄い bin（`src/bin/dsql_schema_migrate.rs`）はこれを呼ぶだけでよい。

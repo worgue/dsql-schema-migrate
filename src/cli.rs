@@ -5,6 +5,7 @@
 //! | `diff <name>` | schema.sql + migrations/（baseline 再生用）+ ローカル PG | `migrations/<ts>_<name>.sql`（DSQL 方言） |
 //! | `apply` | migrations/ + 接続先 env（DATABASE_URL / DSQL_HOST） | なし（stdout に適用ログ、DB の schema_migrations 更新） |
 //! | `rebuild-lab` | schema.sql + ローカル PG | lab DB（entity 生成用） |
+//! | `rename-table <old> <new>` | migrations/（baseline 再生用）+ ローカル PG | `migrations/<ts>_rename_<old>_to_<new>.sql`（RENAME 形） |
 //! | `export` | 接続先（lab または --dsql） | 正規形スキーマ（stdout / --write。--check でドリフト検査） |
 //! | `status` | 接続先 env | stdout（schema_migrations / sys.jobs） |
 
@@ -16,7 +17,7 @@ use sea_orm::{ConnectionTrait, Statement};
 
 use crate::applier::{self, ApplyOptions};
 use crate::connect::{self, DbSource};
-use crate::{dsqlize, psqldef};
+use crate::{dsqlize, psqldef, rename};
 
 #[derive(Parser)]
 #[command(
@@ -90,6 +91,27 @@ enum Command {
     Apply {
         #[arg(long, default_value = "migrations")]
         migrations: PathBuf,
+    },
+    /// テーブル rename の migration (RENAME 形) を baseline の catalog から機械生成する
+    ///
+    /// psqldef の diff は rename を DROP + CREATE と見るため、rename はこちらで作る。
+    /// 生成後に schema.sql の該当テーブル・制約・index の名前を <NEW> に直し、
+    /// `diff` で差分なしになることを確認する
+    RenameTable {
+        /// 現在のテーブル名（baseline = migrations/ の再生結果に存在すること）
+        old: String,
+        /// 新しいテーブル名
+        new: String,
+        /// テーブルの schema
+        #[arg(long, default_value = "public")]
+        table_schema: String,
+        #[arg(long, default_value = "migrations")]
+        migrations: PathBuf,
+        /// baseline 再生に使う使い捨てローカル DB
+        #[arg(long, default_value = "_dsql_scratch")]
+        scratch_db: String,
+        #[command(flatten)]
+        pg: LocalPg,
     },
     /// schema.sql から entity 生成用のローカル lab DB を再構築する
     RebuildLab {
@@ -176,6 +198,14 @@ pub async fn run() -> anyhow::Result<()> {
             pg,
         } => diff(&name, &schema, &migrations, &scratch_db, enable_drop, &pg).await,
         Command::Apply { migrations } => apply(&migrations).await,
+        Command::RenameTable {
+            old,
+            new,
+            table_schema,
+            migrations,
+            scratch_db,
+            pg,
+        } => rename_table(&old, &new, &table_schema, &migrations, &scratch_db, &pg).await,
         Command::RebuildLab { schema, lab_db, pg } => rebuild_lab(&schema, &lab_db, &pg).await,
         Command::Export {
             db,
@@ -197,21 +227,9 @@ async fn diff(
     enable_drop: bool,
     pg: &LocalPg,
 ) -> anyhow::Result<()> {
-    // baseline: migrations/ を空の scratch に再生する（履歴テーブルは作らない）。
+    // baseline: migrations/ を空の scratch に再生する。
     // これにより「migrations の積み重ね ⊕ 今回の diff = schema.sql」の整合が毎回検査される
-    pg.recreate(scratch_db).await?;
-    let db = connect::connect(&DbSource::Direct(pg.url(scratch_db))).await?;
-    let migrations = applier::load_migrations(migrations_dir)?;
-    applier::apply_migrations(
-        &db,
-        &migrations,
-        &ApplyOptions {
-            is_dsql: false,
-            record_history: false,
-        },
-    )
-    .await
-    .context("baseline 再生に失敗しました (migrations/*.sql が不整合の可能性)")?;
+    let db = replay_baseline(pg, scratch_db, migrations_dir).await?;
 
     let desired = std::fs::read_to_string(schema)
         .with_context(|| format!("スキーマファイルを読めません: {}", schema.display()))?;
@@ -246,6 +264,79 @@ async fn diff(
     println!("生成: {}\n", path.display());
     print!("{content}");
     Ok(())
+}
+
+/// migrations/ を空の scratch DB に再生し、その接続を返す（履歴テーブルは作らない）。
+/// `diff` と `rename-table` の baseline はどちらもこれ。
+async fn replay_baseline(
+    pg: &LocalPg,
+    scratch_db: &str,
+    migrations_dir: &Path,
+) -> anyhow::Result<sea_orm::DatabaseConnection> {
+    pg.recreate(scratch_db).await?;
+    let db = connect::connect(&DbSource::Direct(pg.url(scratch_db))).await?;
+    let migrations = applier::load_migrations(migrations_dir)?;
+    applier::apply_migrations(
+        &db,
+        &migrations,
+        &ApplyOptions {
+            is_dsql: false,
+            record_history: false,
+        },
+    )
+    .await
+    .context("baseline 再生に失敗しました (migrations/*.sql が不整合の可能性)")?;
+    Ok(db)
+}
+
+async fn rename_table(
+    old: &str,
+    new: &str,
+    table_schema: &str,
+    migrations_dir: &Path,
+    scratch_db: &str,
+    pg: &LocalPg,
+) -> anyhow::Result<()> {
+    let db = replay_baseline(pg, scratch_db, migrations_dir).await?;
+    let catalog = rename::load_catalog(&db, table_schema, old)
+        .await?
+        .with_context(|| {
+            format!(
+                "テーブル {table_schema}.{old} が baseline (migrations/ の再生結果) にありません。\
+                 schema.sql に書いた新しい名前ではなく、migrations で作られた現在の名前を指定してください"
+            )
+        })?;
+    let plan = rename::plan(table_schema, old, new, &catalog)?;
+    // 衝突はファイル書き出しより前に検査する (止まったときに migration を残さない)
+    let taken = rename::existing_relations(&db, table_schema, &plan.new_names).await?;
+    if !taken.is_empty() {
+        bail!(
+            "生成する名前が baseline に既にあります: {}。別のテーブル名にするか、\
+             先に既存の relation を改名してください",
+            taken.join(", ")
+        );
+    }
+
+    let slug = format!("rename_{}_to_{}", file_safe(old), file_safe(new));
+    let version = format!("{}_{slug}.sql", chrono::Utc::now().format("%Y%m%d%H%M%S"));
+    let path = migrations_dir.join(&version);
+    let content = rename::render(&slug, &plan);
+    std::fs::write(&path, &content)
+        .with_context(|| format!("migration の書き込みに失敗: {}", path.display()))?;
+    println!("生成: {}\n", path.display());
+    print!("{content}");
+    println!(
+        "\n次: schema.sql の CREATE TABLE / 制約 / CREATE INDEX の名前を {old} から {new} に直し \
+         (注記で「そのまま」とした名前は除く)、`diff` で差分なしになることを確認してください"
+    );
+    Ok(())
+}
+
+/// テーブル名をファイル名の slug に使える形にする（英数字と `_` 以外は `_`）。
+fn file_safe(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
 }
 
 async fn apply(migrations_dir: &Path) -> anyhow::Result<()> {

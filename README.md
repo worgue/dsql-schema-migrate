@@ -77,6 +77,7 @@ lib として使う場合のクレート名は `dsql_schema_migrate`。
 |---|---|---|
 | `diff <name>` | schema.sql + migrations/ + ローカル PG | `migrations/<ts>_<name>.sql`（DSQL 方言） |
 | `apply` | migrations/ + 接続先 env | 適用ログ（DB の `schema_migrations` 更新） |
+| `rename-table <old> <new>` | migrations/ + ローカル PG | `migrations/<ts>_rename_<old>_to_<new>.sql`（RENAME 形） |
 | `rebuild-lab` | schema.sql + ローカル PG | lab DB（entity 生成用） |
 | `export` | 接続先（lab または `--dsql`） | 正規形スキーマ（`--check` でドリフト検査） |
 | `status` | 接続先 env | `schema_migrations` / `sys.jobs`（ASYNC index） |
@@ -98,6 +99,33 @@ lib として使う場合のクレート名は `dsql_schema_migrate`。
 4. `DSQL_HOST=<endpoint> dsql-schema-migrate apply` で適用 → `status` で
    ASYNC index ジョブを確認 → `export --dsql --check` でドリフト検査
 5. entity 生成が要るプロジェクトは `rebuild-lab` で lab DB を再構築してから生成する
+
+### テーブルの rename
+
+psqldef の diff はテーブル rename を DROP TABLE + CREATE TABLE と見るため、rename は
+`diff` では作れない（データが失われる）。代わりに `rename-table` が baseline（migrations/ の
+再生結果）の catalog から **RENAME 形**の migration を機械生成する:
+
+```sh
+dsql-schema-migrate rename-table items things   # --table-schema で public 以外も可
+```
+
+生成される文（DSQL で通ることを 2026-11-04 に sandbox クラスターで実測した順）:
+
+1. `ALTER TABLE "public"."items" RENAME TO "things"`
+2. PRIMARY KEY / UNIQUE 制約の `ALTER TABLE "public"."things" RENAME CONSTRAINT "items_pkey" TO "things_pkey"`
+   （背後の index 名も追随する）
+3. 残る index の `ALTER INDEX "public"."items_status_idx" RENAME TO "things_status_idx"`
+
+名前の追従は「`<old>_` で始まる名前の prefix を `<new>_` に置き換える」規則だけ
+（PG / psqldef の自動命名と同じ形）。規則に合わない名前はそのまま残し、ファイル先頭の
+コメントに列挙する。**CHECK 制約は名前を変えない**（CHECK の `RENAME CONSTRAINT` は DSQL で
+未実測。per-table の名前空間なので衝突しない）。生成する名前が baseline に既にあれば止まる
+（ファイルは残さない）。
+
+生成後は schema.sql の該当テーブル・制約・index の名前を新名に直し（注記で「そのまま」と
+した名前は旧名のまま）、`diff` で**差分なし**になることを確認してから `apply` する。
+列の変更を伴う rename は従来どおり手書き（テーブル再作成パターン）。
 
 途中で apply が失敗しても、文単位チェックポイントにより再実行は失敗した文から再開する
 （先頭からのやり直しで `already exists` に詰まらない）。DSQL の OCC 競合（`OC001`
