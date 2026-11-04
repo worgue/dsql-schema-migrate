@@ -8,6 +8,8 @@ Cargo.toml の version を上げること（semver。1.0 未満は minor が bre
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.4.0) - 2026-11-04
+
 - feature: CLI に `rename-table <old> <new>` を追加 (worgue からの依頼。psqldef の diff は
   テーブル rename を DROP + CREATE と見るため、rename は手書きに落ちていた)。baseline
   (migrations/ の再生結果) の catalog から対象テーブルの PK / UNIQUE 制約と index を読み、
