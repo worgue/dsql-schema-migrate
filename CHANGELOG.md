@@ -8,6 +8,20 @@ Cargo.toml の version を上げること（semver。1.0 未満は minor が bre
 
 ## [Unreleased]
 
+- feature: CLI に `rename-table <old> <new>` を追加 (worgue からの依頼。psqldef の diff は
+  テーブル rename を DROP + CREATE と見るため、rename は手書きに落ちていた)。baseline
+  (migrations/ の再生結果) の catalog から対象テーブルの PK / UNIQUE 制約と index を読み、
+  DSQL で通ることが実測済みの RENAME 形 (`ALTER TABLE ... RENAME TO` → PK / UNIQUE の
+  `RENAME CONSTRAINT` → 残る index の `ALTER INDEX ... RENAME TO`) だけで
+  `migrations/<ts>_rename_<old>_to_<new>.sql` を生成する。名前の追従は `<old>_` prefix の
+  置き換え規則のみで、規則外の名前と CHECK 制約 (CHECK の RENAME CONSTRAINT は DSQL で未実測)
+  はそのまま残して先頭コメントに注記する。生成名が baseline と衝突する・テーブルが baseline に
+  無い・識別子が 63 バイトを超える場合はファイルを残さず止まる。受け入れ条件「出力を
+  migrations/ に置き schema.sql を新名に直した `diff` が差分なし」は結合テスト
+  (`tests/rename_table.rs`) で担保。公開 API は追加のみ (`rename` module: `plan` / `render` /
+  `load_catalog` / `existing_relations` / `quote_ident`)。`--table-schema` で public 以外の
+  schema も指定できる
+
 ## [0.3.0](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.3.0) - 2026-10-27
 
 - feature: applier が DSQL の OCC 競合 (SQLSTATE `OC000` / `OC001` / `40001`) で失敗した文を
