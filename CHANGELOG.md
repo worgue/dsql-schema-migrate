@@ -8,6 +8,8 @@ Cargo.toml の version を上げること（semver。1.0 未満は minor が bre
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.4.1) - 2026-11-05
+
 - fix: psqldef v3.11.29 以降で DSQL から export すると、全テーブルの主キーに
   `INCLUDE (<主キー以外の全列>)` が付き `export --dsql --check` が偽ドリフトになる問題を修正
   (kadai からの報告)。DSQL の catalog が主キーを全列 INCLUDE の index として報告するのを、
