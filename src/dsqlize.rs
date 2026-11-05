@@ -428,6 +428,10 @@ fn strip_using_btree(stmt: &str) -> String {
 /// - `from_dsql=true` では DSQL catalog のリーク（index の対象テーブルが
 ///   `<table>_index` と報告される）を除去する（実クラスタとのドリフト検査用。
 ///   `_index` で終わる名前のテーブルとは共存できないので付けないこと）
+/// - `from_dsql=true` では主キー制約の `INCLUDE (...)` も除去する。DSQL の catalog は
+///   主キーを「主キー以外の全列を INCLUDE した index」として報告し、psqldef v3.11.29 以降は
+///   それを export にそのまま書き出すため。除去するのは INCLUDE がちょうど
+///   「主キー以外の全列」の場合だけで、それ以外の INCLUDE は残してドリフトとして見せる
 /// - 文の間は空行 1 つ、末尾は改行 1 つに揃える
 pub fn normalize_export(export: &str, from_dsql: bool) -> String {
     // 変換（catalog リーク除去）→ 運用テーブル除去の順。DSQL の `_index` リークを
@@ -435,6 +439,9 @@ pub fn normalize_export(export: &str, from_dsql: bool) -> String {
     let statements: Vec<String> = split_statements(&strip_using_btree(export))
         .into_iter()
         .map(|s| match StatementKind::of(&s) {
+            StatementKind::CreateTable if from_dsql => {
+                sort_table_body(&strip_dsql_pkey_include(&s))
+            }
             StatementKind::CreateTable => sort_table_body(&s),
             StatementKind::CreateIndex if from_dsql => s.replacen("_index (", " (", 1),
             _ => s,
@@ -470,6 +477,64 @@ fn target_table(stmt: &str) -> Option<String> {
     let token = rest.split(|c: char| c.is_whitespace() || c == '(').next()?;
     let name = token.rsplit('.').next()?.trim_matches('"');
     (!name.is_empty()).then(|| name.to_owned())
+}
+
+/// CREATE TABLE の主キー制約行から、DSQL catalog 由来の `INCLUDE (<主キー以外の全列>)` を
+/// 除去する。INCLUDE の列集合が「主キー以外の全列」と一致しない行はそのまま残す。
+/// 定義は 1 行 1 要素である前提（psqldef export の形式）。
+fn strip_dsql_pkey_include(stmt: &str) -> String {
+    let lines: Vec<&str> = stmt.lines().collect();
+    let columns: Vec<&str> = lines
+        .iter()
+        .skip(1)
+        .filter_map(|line| column_name(line))
+        .collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    for line in &lines {
+        out.push(strip_pkey_include_line(line, &columns).unwrap_or_else(|| (*line).to_owned()));
+    }
+    let mut joined = out.join("\n");
+    if stmt.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined
+}
+
+/// カラム定義行（`"name" type ...`）ならカラム名を返す。
+fn column_name(line: &str) -> Option<&str> {
+    let rest = line.trim_start().strip_prefix('"')?;
+    rest.split('"').next()
+}
+
+/// 主キー制約行の INCLUDE を除去した行を返す。対象外なら None。
+fn strip_pkey_include_line(line: &str, columns: &[&str]) -> Option<String> {
+    let (head, tail) = line.split_once(" INCLUDE (")?;
+    let (_, pkey) = head.split_once("PRIMARY KEY (")?;
+    let pkey = pkey.strip_suffix(')')?;
+    let trailing_comma = tail.trim_end().ends_with(',');
+    let include = tail.trim_end().trim_end_matches(',').strip_suffix(')')?;
+    let parse = |list: &str| -> Vec<String> {
+        list.split(',')
+            .map(|c| c.trim().trim_matches('"').to_owned())
+            .collect()
+    };
+    let pkey = parse(pkey);
+    let mut include = parse(include);
+    let mut rest: Vec<String> = columns
+        .iter()
+        .filter(|c| !pkey.iter().any(|p| p == *c))
+        .map(|c| (*c).to_owned())
+        .collect();
+    include.sort();
+    rest.sort();
+    if include != rest {
+        return None;
+    }
+    let mut out = head.to_owned();
+    if trailing_comma {
+        out.push(',');
+    }
+    Some(out)
 }
 
 /// CREATE TABLE 本体の行（カラム定義・制約）を並べ替える。
@@ -808,5 +873,31 @@ mod tests {
         // カラム順が違う DB からの export でも同じ正規形になる
         let export_reordered = "CREATE TABLE \"public\".\"a\" (\n    \"id\" uuid NOT NULL,\n    \"a\" integer,\n    \"b\" text NOT NULL,\n    CONSTRAINT a_pkey PRIMARY KEY (\"id\")\n);\n";
         assert_eq!(normalize_export(export_reordered, false), normalized);
+    }
+
+    #[test]
+    fn normalize_export_は_dsql_の主キー_include_を除去する() {
+        let export = "CREATE TABLE \"public\".\"a\" (\n    \"id\" uuid NOT NULL,\n    \"b\" text,\n    \"c\" integer,\n    CONSTRAINT \"a_pkey\" PRIMARY KEY (\"id\") INCLUDE (\"b\", \"c\")\n);\n";
+        let want = "CREATE TABLE \"public\".\"a\" (\n    \"b\" text,\n    \"c\" integer,\n    \"id\" uuid NOT NULL,\n    CONSTRAINT \"a_pkey\" PRIMARY KEY (\"id\")\n);\n";
+        assert_eq!(normalize_export(export, true), want);
+        // 制約行が途中にあり末尾カンマが付く形・複合主キーでも除去する
+        let export = "CREATE TABLE \"public\".\"a\" (\n    \"x\" uuid NOT NULL,\n    CONSTRAINT \"a_pkey\" PRIMARY KEY (\"x\", \"y\") INCLUDE (\"z\"),\n    \"y\" uuid NOT NULL,\n    \"z\" text\n);\n";
+        assert_eq!(
+            normalize_export(export, true),
+            "CREATE TABLE \"public\".\"a\" (\n    \"x\" uuid NOT NULL,\n    \"y\" uuid NOT NULL,\n    \"z\" text,\n    CONSTRAINT \"a_pkey\" PRIMARY KEY (\"x\", \"y\")\n);\n"
+        );
+        // INCLUDE なし (旧 psqldef) とも同じ正規形になる
+        let old = "CREATE TABLE \"public\".\"a\" (\n    \"id\" uuid NOT NULL,\n    \"b\" text,\n    \"c\" integer,\n    CONSTRAINT \"a_pkey\" PRIMARY KEY (\"id\")\n);\n";
+        assert_eq!(normalize_export(old, true), want);
+    }
+
+    #[test]
+    fn normalize_export_は全列でない主キー_include_とローカル_export_を残す() {
+        // 主キー以外の全列と一致しない INCLUDE は意図不明なのでドリフトとして見せる
+        let export = "CREATE TABLE \"public\".\"a\" (\n    \"b\" text,\n    \"c\" integer,\n    \"id\" uuid NOT NULL,\n    CONSTRAINT \"a_pkey\" PRIMARY KEY (\"id\") INCLUDE (\"b\")\n);\n";
+        assert_eq!(normalize_export(export, true), export);
+        // ローカル PG からの export では INCLUDE に触らない
+        let export = "CREATE TABLE \"public\".\"a\" (\n    \"b\" text,\n    \"id\" uuid NOT NULL,\n    CONSTRAINT \"a_pkey\" PRIMARY KEY (\"id\") INCLUDE (\"b\")\n);\n";
+        assert_eq!(normalize_export(export, false), export);
     }
 }
