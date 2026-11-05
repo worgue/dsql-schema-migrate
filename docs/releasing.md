@@ -45,6 +45,16 @@ musl target は `musl-tools`（musl-gcc）だけで通る（依存の aws-lc-sys
 
 ## 失敗したとき
 
+- tag の `git push` が `! [remote rejected] ... (fatal error in commit_refs_rules)` で拒否される
+  (GitHub 側のエラー。GitHub status は正常・repo の ruleset は branch 向けのみ、という状態でも
+  起きた。再試行しても通らない): REST API で tag を作ると通る。`release.yml` は API 経由の
+  ref 作成でも push event として発火する
+  ```sh
+  sha=$(git rev-parse X.Y.Z^{commit})
+  tag=$(gh api repos/worgue/dsql-schema-migrate/git/tags -f tag=X.Y.Z -f message=X.Y.Z -f object=$sha -f type=commit --jq .sha)
+  gh api repos/worgue/dsql-schema-migrate/git/refs -f ref=refs/tags/X.Y.Z -f sha=$tag
+  git tag -d X.Y.Z && git fetch origin tag X.Y.Z   # ローカルを remote の tag オブジェクトに揃える
+  ```
 - `check` で止まった (tag と version の不一致): tag を消して (`git push --delete origin X.Y.Z` →
   `git tag -d X.Y.Z`) version を直し、同じ tag を打ち直す。Release オブジェクトはまだ無い
 - `build` / `release` で止まった: 原因を直して dev に commit し、tag を打ち直す
