@@ -1,0 +1,4 @@
+[build]
+# forge VM で全開並列にしない (aws-sdk 系のコンパイルでメモリ上限に届くのを防ぐ)。
+# GitHub Actions の workflow は env の CARGO_BUILD_JOBS: default で上限を外している
+jobs = 2

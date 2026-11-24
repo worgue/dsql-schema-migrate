@@ -9,6 +9,8 @@ on:
 permissions: {}
 env:
   BIN: dsql-schema-migrate
+  # .cargo/config.toml の jobs = 2 は forge VM 向け。runner では上限を外す
+  CARGO_BUILD_JOBS: default
 jobs:
   check:
     runs-on: ubuntu-latest

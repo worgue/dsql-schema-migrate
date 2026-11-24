@@ -24,7 +24,8 @@ Aurora DSQL 向けスキーマ管理 crate。この repo 専用の開発環境�
   `docs/releasing.md`。magic-pocket と同じ流儀（`v` なし tag、dev 上で tag、
   `:bookmark: X.Y.Z リリース` commit）
 - 編集後は必ず `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を
-  通すこと（unit test はローカル PostgreSQL なしで動く）
+  通すこと（unit test はローカル PostgreSQL なしで動く）。VM では `just lint` / `just test` 経由で
+  回すと、肥大した `target/` を前段で GC する（`just target-gc`。`TARGET_GC=never` で無効化）
 
 ## 公開リポジトリとしての規律
 

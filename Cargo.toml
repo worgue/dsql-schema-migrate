@@ -22,3 +22,11 @@ dotenvy = "0.15"
 sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "time"] }
 urlencoding = "2"
+
+# forge VM でのビルド用 (target/ の肥大とリンク時のメモリスパイクを抑える)。
+# profile は workspace root でしか効かないため、消費側のビルドには影響しない
+[profile.dev]
+debug = "line-tables-only" # 自コードは行番号を保持 (backtrace は機能する)
+
+[profile.dev.package."*"]
+debug = false # 依存クレートは debuginfo 不要
