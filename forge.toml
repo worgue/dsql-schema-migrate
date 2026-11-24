@@ -17,4 +17,4 @@ path = ".forge/workspace"
 managed = "forge"
 
 [git]
-github_token_type = "app"
+github_token_type = "hostd"
