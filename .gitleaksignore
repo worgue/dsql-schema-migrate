@@ -1,0 +1,23 @@
+# 過去の履歴で受け入れた検知 (2026-11 の全履歴 scan)
+37aacbd2387693f525c0729d227c1649ec658d9e:CHANGELOG.md:org-vocab:13
+10b6cae504ae1408c508b807fdf45aff03595259:CHANGELOG.md:org-vocab:35
+e5705b6ddf2819c12adf614d17f6a766a7941fb9:docs/releasing.md:org-vocab:54
+e5705b6ddf2819c12adf614d17f6a766a7941fb9:docs/releasing.md:org-vocab:55
+f38d97df048644b736f8ed68be634ad899c1ed89:CHANGELOG.md:org-vocab:11
+33852a24412cab9220f2df05ce8c97f5144da82a:.gitignore:org-vocab:4
+33852a24412cab9220f2df05ce8c97f5144da82a:CLAUDE.md:org-vocab:9
+33852a24412cab9220f2df05ce8c97f5144da82a:CLAUDE.md:org-vocab:9
+33852a24412cab9220f2df05ce8c97f5144da82a:CLAUDE.md:org-vocab:14
+33852a24412cab9220f2df05ce8c97f5144da82a:CLAUDE.md:org-vocab:36
+33852a24412cab9220f2df05ce8c97f5144da82a:CLAUDE.md:org-vocab:36
+d367967b6f76be2b5b91bc52e5389735c800d408:CHANGELOG.md:org-vocab:9
+fe2bf5b8d30aade13ec165c1376d1f571ccc90ed:CHANGELOG.md:org-vocab:11
+33852a24412cab9220f2df05ce8c97f5144da82a:CHANGELOG.md:org-vocab:10
+d19dd987e0db24d9509ba498849729824ce08978:CHANGELOG.md:org-vocab:9
+d367967b6f76be2b5b91bc52e5389735c800d408:CLAUDE.md:org-vocab:8
+d367967b6f76be2b5b91bc52e5389735c800d408:CLAUDE.md:org-vocab:8
+d367967b6f76be2b5b91bc52e5389735c800d408:CLAUDE.md:org-vocab:30
+d367967b6f76be2b5b91bc52e5389735c800d408:CLAUDE.md:org-vocab:30
+f38d97df048644b736f8ed68be634ad899c1ed89:src/rename.rs:org-vocab:13
+21521e8b5e04f10c67a8079ec03930d879f33d61:src/dsqlize.rs:org-vocab:297
+d367967b6f76be2b5b91bc52e5389735c800d408:LICENSE:org-vocab:3
