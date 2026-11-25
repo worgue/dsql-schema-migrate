@@ -8,6 +8,14 @@ Cargo.toml の version を上げること（semver。1.0 未満は minor が bre
 
 ## [Unreleased]
 
+- chore: リリースの流れを変更。main の ff と tag の push を、op が host で実行する
+  `just ship-prod` (`scripts/ship.sh`) にまとめた (deploy の代わりにリリースする prod 昇格)。
+  今後の tag は main の先端と同じ commit に付く。crate と CLI の挙動に変更はない
+- chore: 過去の commit の文言を直すため、dev と tag `0.1.0`〜`0.4.1` の履歴を書き換えた
+  (2026-11-25)。コードの内容は同じだが commit hash が変わったので、git 依存を `rev` で pin
+  している消費側は、書き換え後の hash か `tag` に付け替える必要がある。Releases の binary は
+  変えていない
+
 ## [0.4.1](https://github.com/worgue/dsql-schema-migrate/releases/tag/0.4.1) - 2026-11-05
 
 - fix: psqldef v3.11.29 以降で DSQL から export すると、全テーブルの主キーに

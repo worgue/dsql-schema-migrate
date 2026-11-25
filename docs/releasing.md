@@ -3,8 +3,18 @@
 `dsql-schema-migrate` の binary を GitHub Releases へ置くときの手順。
 **tag `X.Y.Z` の push で GitHub Actions (`.github/workflows/release.yml`) が
 各 target の binary をビルドし、Release オブジェクトの作成 (本文は CHANGELOG の該当節)
-と tar.gz / sha256 の添付までを行う**。magic-pocket と同じ流儀 (tag に `v` は付けない。
-tag は dev 上の commit に打つ。リリース作業は LLM が行う)。
+と tar.gz / sha256 の添付までを行う**。tag に `v` は付けない。
+
+役割は 2 つに分かれる:
+
+- **リリースの準備 (LLM が dev で行う)**: version のバンプ・CHANGELOG の確定・リリースコミット・
+  dev への push (手順 1〜5)
+- **昇格とリリース (op が host で行う)**: `just ship-prod` (手順 6)。origin/dev 先端の CI を
+  検証し、origin/main を ff して、`Cargo.toml` の version の tag がまだ無ければ tag を打って
+  push する。この repo は deploy 先を持たないので、prod 昇格の最後が deploy ではなくリリースになる
+
+`just ship-prod` は版を決めない。`Cargo.toml` の version の tag が既にあれば main の ff だけを行い
+(未リリースの変更を main に届ける)、無ければその版をリリースする。
 
 配布 target:
 
@@ -38,10 +48,17 @@ musl target は `musl-tools`（musl-gcc）だけで通る（依存の aws-lc-sys
 3. **検査を通す**: `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`
 4. **コミットする**: `:bookmark: X.Y.Z リリース (<要約>)`
 5. **dev を push する**: `git push origin dev`。CI (`ci.yml`) が green になるのを待つ
-6. **tag を作成して push する**: `git tag -a X.Y.Z -m "X.Y.Z"` → `git push origin X.Y.Z`。
-   これで `release.yml` が発火する
-7. **Release を確認する**: `gh run watch <run-id>` で workflow 成功を確認し、
-   `gh release view X.Y.Z` で asset が 4 target × (tar.gz + sha256) = 8 個あることを確認する
+6. **op に `just ship-prod` を依頼する** (host の main worktree で実行)。次を順に行う:
+   - origin/dev 先端の CI (`ci.yml`) が success であることを確かめる (実行中なら待つ)
+   - origin/main を ff する
+   - tag `X.Y.Z` を打って push する (`release.yml` が発火)
+   - release の run の完走と、asset が 4 target × (tar.gz + sha256) = 8 個あることを確かめる
+
+   先に内容だけ見るなら `DRY_RUN=1 just ship-prod` (push を表示だけにする)。
+   リリースコミットの後ろに変更を積んだ場合は、`[Unreleased]` に未確定の変更が残るので
+   ship-prod が止まる。リリースコミットの sha を渡す (`just ship-prod <sha>`) と、そこまでを
+   昇格してリリースする (その commit が push の先端だったときの CI の run が要る)
+7. **Release を確認する**: `gh release view X.Y.Z` で本文と asset を確認し、依頼元へ返答する
 
 ## 失敗したとき
 
@@ -55,6 +72,10 @@ musl target は `musl-tools`（musl-gcc）だけで通る（依存の aws-lc-sys
   gh api repos/worgue/dsql-schema-migrate/git/refs -f ref=refs/tags/X.Y.Z -f sha=$tag
   git tag -d X.Y.Z && git fetch origin tag X.Y.Z   # ローカルを remote の tag オブジェクトに揃える
   ```
+- `just ship-prod` が途中で止まった: 表示された原因を直して `just ship-prod` を再実行する。
+  済んだ段階 (main の ff・手元の tag) は飛ばして続きから進む。初回や ship.sh を更新した直後は
+  「この ship.sh は origin/dev の版と違います」で止まるので、案内どおり main worktree で
+  `git merge --ff-only origin/dev` してから実行し直す
 - `check` で止まった (tag と version の不一致): tag を消して (`git push --delete origin X.Y.Z` →
   `git tag -d X.Y.Z`) version を直し、同じ tag を打ち直す。Release オブジェクトはまだ無い
 - `build` / `release` で止まった: 原因を直して dev に commit し、tag を打ち直す
@@ -72,5 +93,6 @@ musl target は `musl-tools`（musl-gcc）だけで通る（依存の aws-lc-sys
   (リリース済みなら tag) を書く
 
 !!! note "dev / main の運用について"
-    日常の作業・リリースコミット・tag はすべて dev 上で行う。main / stg / prod への昇格は
-    人間が行う (`release.yml` は tag push で発火するため branch は問わない)。
+    日常の作業とリリースコミットは dev 上で行う。main は dev を ff で追う昇格ポインタで、
+    op の `just ship-prod` だけが進める (tag も ship-prod が main の先端と同じ commit に打つ)。
+    LLM は main と tag を push しない。

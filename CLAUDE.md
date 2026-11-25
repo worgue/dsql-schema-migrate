@@ -20,9 +20,10 @@ Aurora DSQL 向けスキーマ管理 crate。この repo 専用の開発環境�
   破壊的変更（公開 API / CLI の互換を壊す変更）は Cargo.toml の version も上げる
 - feedback 起点の変更を push したら、依頼元へ対応内容と commit hash を返す
   （rev を進める判断を相手に委ねる）
-- リリース（tag `X.Y.Z` push → GitHub Releases に binary）は LLM が行う。手順は
-  `docs/releasing.md`。magic-pocket と同じ流儀（`v` なし tag、dev 上で tag、
-  `:bookmark: X.Y.Z リリース` commit）
+- リリース（tag `X.Y.Z` push → GitHub Releases に binary）は、準備を LLM が dev で行い
+  （version・CHANGELOG・`:bookmark: X.Y.Z リリース` commit・dev への push）、main の ff と
+  tag の push は人間が host で `just ship-prod` を実行して行う（deploy の代わりにリリースする
+  prod 昇格。LLM は main と tag を push しない）。手順は `docs/releasing.md`
 - 編集後は必ず `cargo fmt` / `cargo clippy --all-targets -- -D warnings` / `cargo test` を
   通すこと（unit test はローカル PostgreSQL なしで動く）。VM では `just lint` / `just test` 経由で
   回すと、肥大した `target/` を前段で GC する（`just target-gc`。`TARGET_GC=never` で無効化）

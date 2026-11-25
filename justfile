@@ -25,6 +25,15 @@ lint: _target-gc-guard
 fmt:
     cargo fmt
 
+# --- 昇格・リリース ---
+
+# prod 昇格 (op が host の main worktree で実行): origin/dev 先端の CI を検証 → origin/main を
+# ff → Cargo.toml の version の tag が無ければ tag を打ってリリース (deploy の代わり)。
+# version が変わっていなければ ff だけ。sha 明示はリリースコミットだけを昇格するとき。
+# 表示だけ見るなら DRY_RUN=1 just ship-prod (手順は docs/releasing.md)
+ship-prod sha="":
+    bash scripts/ship.sh prod {{sha}}
+
 # --- target/ の GC ---
 
 # target/ を作り直し、フルビルド直後のサイズを baseline として記録する
