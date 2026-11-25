@@ -48,7 +48,8 @@ musl target は `musl-tools`（musl-gcc）だけで通る（依存の aws-lc-sys
 3. **検査を通す**: `cargo fmt --check` / `cargo clippy --all-targets -- -D warnings` / `cargo test`
 4. **コミットする**: `:bookmark: X.Y.Z リリース (<要約>)`
 5. **dev を push する**: `git push origin dev`。CI (`ci.yml`) が green になるのを待つ
-6. **op に `just ship-prod` を依頼する** (host の main worktree で実行)。次を順に行う:
+6. **op に `just ship-prod` を依頼する** (host の main worktree で実行)。リリースするときだけ
+   確認 (y/N) を挟み、次を順に行う:
    - origin/dev 先端の CI (`ci.yml`) が success であることを確かめる (実行中なら待つ)
    - origin/main を ff する
    - tag `X.Y.Z` を打って push する (`release.yml` が発火)

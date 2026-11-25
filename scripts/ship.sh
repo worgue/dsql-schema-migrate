@@ -20,7 +20,9 @@
 #   DRY_RUN=1              push を表示のみにする (検証は行う)
 #   SHIP_SKIP_CONFIRM=1    確認ゲートを無効にする (既定は ON)
 #   TEST_WORKFLOW          昇格前に success を確かめる workflow ファイル名 (既定 ci.yml)
-#   VERIFY_RUN_DEADLINE    run の完走を待つ上限秒 (既定 1800)
+#   VERIFY_RUN_DEADLINE    release の run の完走を待つ上限秒 (既定 1800)
+#   TEST_WAIT_DEADLINE     main ff の前に実行中の CI の run を待つ上限秒 (既定 1200)
+#   RELEASE_RUN_DEADLINE   tag の push の後に release の run が現れるのを待つ上限秒 (既定 120)
 #
 # host の macOS (bash 3.2) で動く書き方に限る (配列・連想配列・${var,,} 等を使わない)。
 set -euo pipefail
@@ -28,6 +30,8 @@ set -euo pipefail
 RELEASE_WORKFLOW="release.yml"
 TEST_WORKFLOW="${TEST_WORKFLOW:-ci.yml}"
 VERIFY_RUN_DEADLINE="${VERIFY_RUN_DEADLINE:-1800}"
+TEST_WAIT_DEADLINE="${TEST_WAIT_DEADLINE:-1200}"
+RELEASE_RUN_DEADLINE="${RELEASE_RUN_DEADLINE:-120}"
 # release.yml の配布 target 4 つ × (tar.gz + sha256)
 EXPECTED_ASSETS=8
 
@@ -85,7 +89,7 @@ wait_run() {
   local run_id="$1" name="$2" status="" waited=0
   log "$name run $run_id の完走を待ちます (gh run watch)"
   while :; do
-    gh run watch "$run_id" --exit-status >/dev/null 2>&1 || true
+    gh run watch "$run_id" --exit-status || true
     status="$(gh run view "$run_id" --json status --jq .status || true)"
     [ "$status" = "completed" ] && break
     if [ "$waited" -ge "$VERIFY_RUN_DEADLINE" ]; then
@@ -101,7 +105,8 @@ wait_run() {
 
 # --- 確認ゲート --------------------------------------------------------------
 
-# リリース (tag の push) は消費側が参照する版を増やす操作なので、既定で人の確認を挟む。
+# リリース (tag の push) は消費側が参照する版を増やし、取り消しにくい操作なので、
+# リリースするときだけ既定で人の確認を挟む (main の ff だけなら聞かない)。
 # 非対話では黙って通さない
 ship_confirm() {
   local answer
@@ -114,7 +119,7 @@ ship_confirm() {
     return 0
   fi
   [ -t 0 ] || fail "確認ゲート: 対話端末で実行してください (確認を省くなら SHIP_SKIP_CONFIRM=1)"
-  printf 'ship: 上の内容で昇格しますか? [y/N] '
+  printf 'ship: %s をリリースしますか? [y/N] ' "$VERSION"
   read -r answer
   case "$answer" in
   y | Y | yes) ;;
@@ -185,6 +190,9 @@ resolve_prod_sha() {
   if ! git merge-base --is-ancestor HEAD "$SHA"; then
     git merge-base --is-ancestor "$SHA" HEAD ||
       fail "main worktree の HEAD と $(short "$SHA") が分岐しています。\`git status\` と \`git log --oneline $(short "$SHA")..HEAD\` で確認してください"
+    # origin/main へは SHA:main を push するので、HEAD にだけある commit は main に載らない
+    log "注意: main worktree の HEAD には $(short "$SHA") より先の commit があります (昇格対象には含めません):"
+    git log --oneline "$SHA..HEAD" | sed 's/^/ship:     /'
   fi
 }
 
@@ -256,7 +264,8 @@ EOF
       fail "$name の run が $(short "$SHA") にありません。dev へ push すると $wf が動きます (push 直後なら少し待って再実行。dev の途中の commit を sha で指定した場合は、その commit が push の先端だったときしか run がありません)"
     fi
     if [ "$status" != "completed" ]; then
-      wait_run "$run_id" "$name"
+      log "$name (run $run_id) が ${status:-不明} です。完走を待ちます (上限 ${TEST_WAIT_DEADLINE} 秒)"
+      VERIFY_RUN_DEADLINE="$TEST_WAIT_DEADLINE" wait_run "$run_id" "$name"
       conclusion="$RUN_CONCLUSION"
     fi
     [ "$conclusion" = "success" ] ||
@@ -329,7 +338,7 @@ release() {
     return 0
   fi
   log "tag $VERSION を push しました"
-  while [ "$waited" -lt 120 ]; do
+  while [ "$waited" -lt "$RELEASE_RUN_DEADLINE" ]; do
     run_id="$(find_release_run "$existing")"
     [ -n "$run_id" ] && break
     sleep 5
@@ -338,8 +347,10 @@ release() {
   [ -n "${run_id:-}" ] ||
     fail "release の run が見つかりません。gh run list --workflow $RELEASE_WORKFLOW で確認してください (workflow が無効になっていないか: gh workflow list --all)"
   wait_run "$run_id" "release"
+  [ "$RUN_CONCLUSION" != "cancelled" ] ||
+    fail "release の run $run_id が cancelled です (main の ff と tag $VERSION の push は済んでいます)。\`gh run rerun $run_id\` で回し直し、完走後に \`just ship-prod\` を再実行すると Release を確かめ直します"
   [ "$RUN_CONCLUSION" = "success" ] ||
-    fail "release の run $run_id が success ではありません: ${RUN_CONCLUSION:-不明}。gh run view $run_id --log-failed で確認してください。一部の job だけの失敗は \`gh run rerun $run_id --failed\` で再実行できます (対処は docs/releasing.md「失敗したとき」)"
+    fail "release の run $run_id が success ではありません: ${RUN_CONCLUSION:-不明}。gh run view $run_id --log-failed で確認してください。一部の job だけの失敗は \`gh run rerun $run_id --failed\` で再実行できます 完走後に \`just ship-prod\` を再実行すると Release を確かめ直します (対処は docs/releasing.md「失敗したとき」)"
   verify_release_assets
   log "リリース完了: $VERSION ($(short "$SHA"))  https://github.com/worgue/dsql-schema-migrate/releases/tag/$VERSION"
 }
@@ -350,10 +361,13 @@ prod_phase() {
   prod_announce
   if [ "$FF_NEEDED" != 1 ] && [ "$RELEASE_ACTION" = "none" ]; then
     checkout_follow
-    log "昇格するものはありません (origin/main は $(short "$SHA") を含み、$VERSION はリリース済みです)"
+    log "昇格するものはありません (origin/main は $(short "$SHA") を含み、$VERSION は tag 済みです)。Release を確かめ直します"
+    verify_release_assets
     return 0
   fi
-  ship_confirm
+  if [ "$RELEASE_ACTION" = "tag" ]; then
+    ship_confirm
+  fi
   # ff するときだけ CI を検証する (main に入っている commit は昇格時に検証済み)
   if [ "$FF_NEEDED" = 1 ]; then
     verify_ci
